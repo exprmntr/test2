@@ -11,9 +11,9 @@ namespace NCatboostOptions {
     class TBootstrapConfig {
     public:
         explicit TBootstrapConfig(ETaskType taskType)
-            : TakenFraction("sample_rate", taskType == ETaskType::GPU ? 0.66f : 1.0f)
+            : TakenFraction("subsample", 0.66f)
             , BaggingTemperature("bagging_temperature", 1.0)
-            , BootstrapType("type", taskType == ETaskType::GPU ? EBootstrapType::Bayesian : EBootstrapType::Bernoulli)
+            , BootstrapType("type", EBootstrapType::Bayesian)
             , TaskType(taskType)
         {
         }

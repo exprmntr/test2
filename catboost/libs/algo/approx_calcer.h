@@ -35,7 +35,13 @@ inline void UpdateApproxKernel(const double* leafValues, const TIndexType* indic
 }
 
 template <bool StoreExpApprox>
-inline void UpdateApproxBlock(const NPar::TLocalExecutor::TExecRangeParams& params, const double* leafValues, const TIndexType* indices, int blockIdx, double* resArr) {
+inline void UpdateApproxBlock(
+    const NPar::TLocalExecutor::TExecRangeParams& params,
+    const double* leafValues,
+    const TIndexType* indices,
+    int blockIdx,
+    double* resArr
+) {
     const int blockStart = blockIdx * params.GetBlockSize();
     const int nextBlockStart = Min<ui64>(blockStart + params.GetBlockSize(), params.LastId);
     constexpr int VectorWidth = 4;
@@ -49,11 +55,13 @@ inline void UpdateApproxBlock(const NPar::TLocalExecutor::TExecRangeParams& para
 }
 
 template <bool StoreExpApprox>
-inline void UpdateApproxDeltas(const TVector<TIndexType>& indices,
-                               int docCount,
-                               TLearnContext* ctx,
-                               TVector<double>* leafValues,
-                               TVector<double>* resArr) {
+inline void UpdateApproxDeltas(
+    const TVector<TIndexType>& indices,
+    int docCount,
+    TLearnContext* ctx,
+    TVector<double>* leafValues,
+    TVector<double>* resArr
+) {
     ExpApproxIf(StoreExpApprox, leafValues);
 
     double* resArrData = resArr->data();
@@ -61,7 +69,7 @@ inline void UpdateApproxDeltas(const TVector<TIndexType>& indices,
     const double* leafValuesData = leafValues->data();
 
     NPar::TLocalExecutor::TExecRangeParams blockParams(0, docCount);
-    blockParams.SetBlockSize(10000);
+    blockParams.SetBlockSize(1000);
 
     ctx->LocalExecutor.ExecRange([=] (int blockIdx) {
         UpdateApproxBlock<StoreExpApprox>(blockParams, leafValuesData, indicesData, blockIdx, resArrData);
@@ -72,41 +80,48 @@ namespace {
 constexpr int APPROX_BLOCK_SIZE = 500;
 
 template <typename TError>
-void CalcShiftedApproxDers(const TVector<double>& approx,
-                           const TVector<double>& approxDelta,
-                           const TVector<float>& target,
-                           const TVector<float>& weight,
-                           const TError& error,
-                           int sampleStart,
-                           int sampleFinish,
-                           TVector<TDer1Der2>* scratchDers,
-                           TLearnContext* ctx) {
+void CalcShiftedApproxDers(
+    const TVector<double>& approx,
+    const TVector<double>& approxDelta,
+    const TVector<float>& target,
+    const TVector<float>& weight,
+    const TError& error,
+    int sampleStart,
+    int sampleFinish,
+    TVector<TDer1Der2>* scratchDers,
+    TLearnContext* ctx
+) {
     NPar::TLocalExecutor::TExecRangeParams blockParams(sampleStart, sampleFinish);
     blockParams.SetBlockSize(APPROX_BLOCK_SIZE);
     ctx->LocalExecutor.ExecRange([&](int blockId) {
         const int blockOffset = sampleStart + blockId * blockParams.GetBlockSize(); // espetrov: OK for small datasets
-        error.CalcDersRange(blockOffset, Min(blockParams.GetBlockSize(), sampleFinish - blockOffset),
-                            approx.data(),
-                            approxDelta.data(),
-                            target.data(),
-                            weight.data(),
-                            scratchDers->data() - sampleStart);
+        error.CalcDersRange(
+            blockOffset,
+            Min(blockParams.GetBlockSize(), sampleFinish - blockOffset),
+            approx.data(),
+            approxDelta.data(),
+            target.data(),
+            weight.data(),
+            scratchDers->data() - sampleStart
+        );
     }, 0, blockParams.GetBlockCount(), NPar::TLocalExecutor::WAIT_COMPLETE);
 }
 } // anonymous namespace
 
 template <ELeavesEstimation LeafEstimationType, typename TError>
-void CalcApproxDersRange(const TIndexType* indices,
-                         const float* target,
-                         const float* weight,
-                         const double* approx,
-                         const double* approxDeltas,
-                         const TError& error,
-                         int sampleCount,
-                         int iteration,
-                         TLearnContext* ctx,
-                         TVector<TSum>* buckets,
-                         TDer1Der2* scratchDers) {
+void CalcApproxDersRange(
+    const TIndexType* indices,
+    const float* target,
+    const float* weight,
+    const double* approx,
+    const double* approxDeltas,
+    const TError& error,
+    int sampleCount,
+    int iteration,
+    TLearnContext* ctx,
+    TVector<TSum>* buckets,
+    TDer1Der2* scratchDers
+) {
     const int leafCount = buckets->ysize();
 
     NPar::TLocalExecutor::TExecRangeParams blockParams(0, sampleCount);
@@ -129,12 +144,15 @@ void CalcApproxDersRange(const TIndexType* indices,
 
         for (int innerBlockStart = blockStart; innerBlockStart < nextBlockStart; innerBlockStart += innerBlockSize) {
             const int nextInnerBlockStart = Min(nextBlockStart, innerBlockStart + innerBlockSize);
-            error.CalcDersRange(innerBlockStart, nextInnerBlockStart - innerBlockStart,
-                                approx,
-                                approxDeltas,
-                                target,
-                                weight,
-                                approxDer - innerBlockStart);
+            error.CalcDersRange(
+                innerBlockStart,
+                nextInnerBlockStart - innerBlockStart,
+                approx,
+                approxDeltas,
+                target,
+                weight,
+                approxDer - innerBlockStart
+            );
             if (weight != nullptr) {
                 for (int z = innerBlockStart; z < nextInnerBlockStart; ++z) {
                     TDer1Der2& ders = bucketDers[indices[z]];
@@ -163,19 +181,20 @@ void CalcApproxDersRange(const TIndexType* indices,
 }
 
 template <ELeavesEstimation LeafEstimationType, typename TError>
-void CalcApproxDeltaIterationSimple(const TVector<TIndexType>& indices,
-                                    const TVector<float>& target,
-                                    const TVector<float>& weight,
-                                    const TVector<ui32>& queriesId,
-                                    const THashMap<ui32, ui32>& queriesSize,
-                                    const TFold::TBodyTail& bt,
-                                    const TError& error,
-                                    int iteration,
-                                    float l2Regularizer,
-                                    TLearnContext* ctx,
-                                    TVector<TSum>* buckets,
-                                    TVector<double>* resArr,
-                                    TVector<TDer1Der2>* scratchDers) {
+void CalcApproxDeltaIterationSimple(
+    const TVector<TIndexType>& indices,
+    const TVector<float>& target,
+    const TVector<float>& weight,
+    const TVector<TQueryInfo>& queriesInfo,
+    const TFold::TBodyTail& bt,
+    const TError& error,
+    int iteration,
+    float l2Regularizer,
+    TLearnContext* ctx,
+    TVector<TSum>* buckets,
+    TVector<double>* resArr,
+    TVector<TDer1Der2>* scratchDers
+) {
     int leafCount = buckets->ysize();
 
     if (error.GetErrorType() == EErrorType::PerObjectError) {
@@ -188,8 +207,8 @@ void CalcApproxDeltaIterationSimple(const TVector<TIndexType>& indices,
     } else {
         Y_ASSERT(error.GetErrorType() == EErrorType::QuerywiseError);
         Y_ASSERT(LeafEstimationType == ELeavesEstimation::Gradient);
-        CalcApproxDersQueriesRange(indices, bt.Approx[0], *resArr, target, weight, queriesId, queriesSize, error,
-                                   bt.BodyFinish, bt.TailFinish, iteration, buckets, scratchDers);
+        CalcApproxDersQueriesRange(indices, bt.Approx[0], *resArr, target, weight, queriesInfo, error,
+                                   bt.BodyQueryFinish, iteration, buckets, scratchDers);
     }
 
     // compute mixed model
@@ -210,7 +229,7 @@ void CalcApproxDeltaIterationSimple(const TVector<TIndexType>& indices,
             CalcShiftedApproxDersPairs(bt.Approx[0], *resArr, bt.Competitors, error, bt.BodyFinish, bt.TailFinish, scratchDers);
         } else {
             Y_ASSERT(error.GetErrorType() == EErrorType::QuerywiseError);
-            CalcShiftedApproxDersQueries(bt.Approx[0], *resArr, target, weight, queriesId, queriesSize, error, bt.BodyFinish, bt.TailFinish, scratchDers);
+            CalcShiftedApproxDersQueries(bt.Approx[0], *resArr, target, weight, queriesInfo, error, bt.BodyQueryFinish, bt.TailQueryFinish, scratchDers);
         }
 
         TSum* bucketsData = buckets->data();
@@ -233,12 +252,14 @@ void CalcApproxDeltaIterationSimple(const TVector<TIndexType>& indices,
 }
 
 template <typename TError>
-void CalcApproxDeltaSimple(const TFold& ff,
-                           const TSplitTree& tree,
-                           const TError& error,
-                           TLearnContext* ctx,
-                           TVector<TVector<TVector<double>>>* approxDelta,
-                           TVector<TIndexType>* ind) {
+void CalcApproxDeltaSimple(
+    const TFold& ff,
+    const TSplitTree& tree,
+    const TError& error,
+    TLearnContext* ctx,
+    TVector<TVector<TVector<double>>>* approxDelta,
+    TVector<TIndexType>* ind
+) {
     auto& indices = *ind;
     approxDelta->resize(ff.BodyTailArr.ysize());
 
@@ -266,11 +287,11 @@ void CalcApproxDeltaSimple(const TFold& ff,
         const float l2Regularizer = treeLearnerOptions.L2Reg;
         for (int it = 0; it < gradientIterations; ++it) {
             if (estimationMethod == ELeavesEstimation::Newton) {
-                CalcApproxDeltaIterationSimple<ELeavesEstimation::Newton>(indices, ff.LearnTarget, ff.LearnWeights, ff.LearnQueryId, ff.LearnQuerySize, bt, error, it, l2Regularizer, ctx,
+                CalcApproxDeltaIterationSimple<ELeavesEstimation::Newton>(indices, ff.LearnTarget, ff.LearnWeights, ff.LearnQueryInfo, bt, error, it, l2Regularizer, ctx,
                                                                         &buckets, &resArr[0], &scratchDers);
             } else {
                 CB_ENSURE(estimationMethod == ELeavesEstimation::Gradient);
-                CalcApproxDeltaIterationSimple<ELeavesEstimation::Gradient>(indices, ff.LearnTarget, ff.LearnWeights, ff.LearnQueryId, ff.LearnQuerySize, bt, error, it, l2Regularizer, ctx,
+                CalcApproxDeltaIterationSimple<ELeavesEstimation::Gradient>(indices, ff.LearnTarget, ff.LearnWeights, ff.LearnQueryInfo, bt, error, it, l2Regularizer, ctx,
                                                                           &buckets, &resArr[0], &scratchDers);
             }
         }
@@ -278,12 +299,14 @@ void CalcApproxDeltaSimple(const TFold& ff,
 }
 
 template <typename TError>
-void CalcApproxDelta(const TFold& ff,
-                     const TSplitTree& tree,
-                     const TError& error,
-                     TLearnContext* ctx,
-                     TVector<TVector<TVector<double>>>* approxDelta,
-                     TVector<TIndexType>* ind) {
+void CalcApproxDelta(
+    const TFold& ff,
+    const TSplitTree& tree,
+    const TError& error,
+    TLearnContext* ctx,
+    TVector<TVector<TVector<double>>>* approxDelta,
+    TVector<TIndexType>* ind
+) {
     int approxDimension = ff.GetApproxDimension();
     if (approxDimension == 1) {
         CalcApproxDeltaSimple(ff, tree, error, ctx, approxDelta, ind);
@@ -293,19 +316,20 @@ void CalcApproxDelta(const TFold& ff,
 }
 
 template <ELeavesEstimation LeafEstimationType, typename TError>
-void CalcLeafValuesIterationSimple(const TVector<TIndexType>& indices,
-                                   const TVector<float>& target,
-                                   const TVector<float>& weight,
-                                   const TVector<ui32>& queriesId,
-                                   const THashMap<ui32, ui32>& queriesSize,
-                                   const TVector<TVector<TCompetitor>>& competitors,
-                                   const TError& error,
-                                   int iteration,
-                                   float l2Regularizer,
-                                   TLearnContext* ctx,
-                                   TVector<TSum>* buckets,
-                                   TVector<double>* approx,
-                                   TVector<TDer1Der2>* scratchDers) {
+void CalcLeafValuesIterationSimple(
+    const TVector<TIndexType>& indices,
+    const TVector<float>& target,
+    const TVector<float>& weight,
+    const TVector<TQueryInfo>& queriesInfo,
+    const TVector<TVector<TCompetitor>>& competitors,
+    const TError& error,
+    int iteration,
+    float l2Regularizer,
+    TLearnContext* ctx,
+    TVector<TSum>* buckets,
+    TVector<double>* approx,
+    TVector<TDer1Der2>* scratchDers
+) {
     int leafCount = buckets->ysize();
     int learnSampleCount = approx->ysize();
 
@@ -319,8 +343,8 @@ void CalcLeafValuesIterationSimple(const TVector<TIndexType>& indices,
     } else {
         Y_ASSERT(error.GetErrorType() == EErrorType::QuerywiseError);
         Y_ASSERT(LeafEstimationType == ELeavesEstimation::Gradient);
-        CalcApproxDersQueriesRange(indices, *approx, /*approxDelta*/ TVector<double>(), target, weight, queriesId, queriesSize, error,
-                                   learnSampleCount, learnSampleCount, iteration, buckets, scratchDers);
+        CalcApproxDersQueriesRange(indices, *approx, /*approxDelta*/ TVector<double>(), target, weight, queriesInfo, error,
+                                   queriesInfo.ysize(), iteration, buckets, scratchDers);
     }
 
     TVector<double> curLeafValues;
@@ -333,13 +357,15 @@ void CalcLeafValuesIterationSimple(const TVector<TIndexType>& indices,
 }
 
 template <typename TError>
-void CalcLeafValuesSimple(const TTrainData& data,
-                          const TSplitTree& tree,
-                          const TError& error,
-                          TLearnContext* ctx,
-                          TVector<TVector<double>>* leafValues,
-                          TVector<TIndexType>* ind) {
-    const TFold& ff = ctx->LearnProgress.AveragingFold;
+void CalcLeafValuesSimple(
+    const TTrainData& data,
+    const TSplitTree& tree,
+    const TError& error,
+    const TFold& ff,
+    TLearnContext* ctx,
+    TVector<TVector<double>>* leafValues,
+    TVector<TIndexType>* ind
+) {
     auto& indices = *ind;
     indices = BuildIndices(ff, tree, data, &ctx->LocalExecutor);
 
@@ -362,12 +388,12 @@ void CalcLeafValuesSimple(const TTrainData& data,
     const float l2Regularizer = learnerOptions.L2Reg;
     for (int it = 0; it < gradientIterations; ++it) {
         if (estimationMethod == ELeavesEstimation::Newton) {
-            CalcLeafValuesIterationSimple<ELeavesEstimation::Newton>(indices, ff.LearnTarget, ff.LearnWeights, ff.LearnQueryId, ff.LearnQuerySize, bt.Competitors,
+            CalcLeafValuesIterationSimple<ELeavesEstimation::Newton>(indices, ff.LearnTarget, ff.LearnWeights, ff.LearnQueryInfo, bt.Competitors,
                                                                    error, it, l2Regularizer, ctx,
                                                                    &buckets, &approx[0], &scratchDers);
         } else {
             CB_ENSURE(estimationMethod == ELeavesEstimation::Gradient);
-            CalcLeafValuesIterationSimple<ELeavesEstimation::Gradient>(indices, ff.LearnTarget, ff.LearnWeights, ff.LearnQueryId, ff.LearnQuerySize, bt.Competitors,
+            CalcLeafValuesIterationSimple<ELeavesEstimation::Gradient>(indices, ff.LearnTarget, ff.LearnWeights, ff.LearnQueryInfo, bt.Competitors,
                                                                      error, it, l2Regularizer, ctx,
                                                                      &buckets, &approx[0], &scratchDers);
         }
@@ -384,40 +410,33 @@ void CalcLeafValuesSimple(const TTrainData& data,
 }
 
 template <typename TError>
-void CalcLeafValues(const TTrainData& data,
-                    const TSplitTree& tree,
-                    const TError& error,
-                    TLearnContext* ctx,
-                    TVector<TVector<double>>* leafValues,
-                    TVector<TIndexType>* ind) {
+void CalcLeafValues(
+    const TTrainData& data,
+    const TError& error,
+    const TFold& fold,
+    const TSplitTree& tree,
+    TLearnContext* ctx,
+    TVector<TVector<double>>* leafValues,
+    TVector<TIndexType>* ind
+) {
     const int approxDimension = ctx->LearnProgress.AveragingFold.GetApproxDimension();
     if (approxDimension == 1) {
-        CalcLeafValuesSimple(data, tree, error, ctx, leafValues, ind);
+        CalcLeafValuesSimple(data, tree, error, fold, ctx, leafValues, ind);
     } else {
-        CalcLeafValuesMulti(data, tree, error, ctx, leafValues, ind);
+        CalcLeafValuesMulti(data, tree, error, fold, ctx, leafValues, ind);
     }
 }
 
 // output is permuted (learnSampleCount samples are permuted by LearnPermutation, test is indexed directly)
 template <typename TError>
-void CalcApproxForLeafStruct(const TTrainData& data,
-                             const TError& error,
-                             const TVector<TFold*>& folds,
-                             const TSplitTree& tree,
-                             TLearnContext* ctx,
-                             TVector<TVector<TVector<TVector<double>>>>* approxDelta) { // [foldId][bodyTailId][approxDim][docIdxInPermuted]
-    int foldCount = folds.ysize();
-    approxDelta->resize(foldCount);
-    TVector<TVector<TIndexType>> indices(foldCount);
-    ctx->LocalExecutor.ExecRange([&](int foldId) {
-        indices[foldId] = BuildIndices(*folds[foldId], tree, data, &ctx->LocalExecutor);
-    }, 0, folds.ysize(), NPar::TLocalExecutor::WAIT_COMPLETE);
-    ctx->LocalExecutor.ExecRange([&](int foldId) {
-        CalcApproxDelta(*folds[foldId],
-                        tree,
-                        error,
-                        ctx,
-                        &(*approxDelta)[foldId],
-                        &indices[foldId]);
-    }, 0, folds.ysize(), NPar::TLocalExecutor::WAIT_COMPLETE);
+void CalcApproxForLeafStruct(
+    const TTrainData& data,
+    const TError& error,
+    const TFold& fold,
+    const TSplitTree& tree,
+    TLearnContext* ctx,
+    TVector<TVector<TVector<double>>>* approxDelta// [bodyTailId][approxDim][docIdxInPermuted]
+) {
+    TVector<TIndexType> indices = BuildIndices(fold, tree, data, &ctx->LocalExecutor);
+    CalcApproxDelta(fold, tree, error, ctx, approxDelta, &indices);
 }

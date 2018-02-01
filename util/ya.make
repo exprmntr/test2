@@ -214,6 +214,7 @@ JOIN_SRCS(
     stream/labeled.cpp
     stream/tokenizer.cpp
     stream/trace.cpp
+    stream/fwd.cpp
 )
 
 # string
@@ -391,6 +392,7 @@ JOIN_SRCS(
     thread/lfqueue.cpp
     thread/lfstack.cpp
     thread/singleton.cpp
+    thread/fwd.cpp
 )
 
 END()

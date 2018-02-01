@@ -1,4 +1,5 @@
 import sys
+from copy import deepcopy
 from six import iteritems, string_types, integer_types
 import os
 from collections import Iterable, Sequence, Mapping, MutableMapping
@@ -24,12 +25,12 @@ except ImportError:
         pass
 
 try:
-    from catboost.gpu._catboost import _PoolBase, _CatBoostBase, CatboostError, _cv, _set_logger, _reset_logger, _configure_malloc
+    from catboost.gpu._catboost import _PoolBase, _CatBoostBase, _MetricCalcerBase, CatboostError, _cv, _set_logger, _reset_logger, _configure_malloc
 except ImportError:
     try:
-        from _catboost import _PoolBase, _CatBoostBase, CatboostError, _cv, _set_logger, _reset_logger, _configure_malloc
+        from _catboost import _PoolBase, _CatBoostBase, _MetricCalcerBase, CatboostError, _cv, _set_logger, _reset_logger, _configure_malloc
     except ImportError:
-        from ._catboost import _PoolBase, _CatBoostBase, CatboostError, _cv, _set_logger, _reset_logger, _configure_malloc
+        from ._catboost import _PoolBase, _CatBoostBase, _MetricCalcerBase, CatboostError, _cv, _set_logger, _reset_logger, _configure_malloc
 
 from contextlib import contextmanager
 
@@ -458,15 +459,17 @@ class CatBoost(_CatBoostBase):
         ----------
         params : dict
             Parameters for CatBoost.
-            CatBoost has many of parameters, all have default values.
-            If  None, all params still defaults.
-            If  dict, overriding some (or all) params.
+            If  None, all params are set to their defaults.
+            If  dict, overriding parameters present in dict.
 
         model_file : string, optional (default=None)
             If string, giving the path to the file with input model.
         """
+        params = deepcopy(params)
         if params is None:
             params = {}
+
+        self._process_synonyms(params)
 
         self._additional_params = ['calc_feature_importance']
         kwargs = {}
@@ -480,7 +483,14 @@ class CatBoost(_CatBoostBase):
         params['kwargs'] = kwargs
 
         if 'verbose' in params:
-            warnings.warn("The 'verbose' parameter is deprecated, use 'logging_level' parameter instead (posible values: 'Silent', 'Verbose', 'Info', 'Debug').", FutureWarning, 2)
+            if not isinstance(params['verbose'], bool):
+                raise CatboostError('verbose should be bool')
+            if 'logging_level' in params:
+                raise CatboostError('only one of parameters logging_level, verbose should be set.')
+            if params['verbose'] is True:
+                params['logging_level'] = 'Verbose'
+            else:
+                params['logging_level'] = 'Silent'
             del params['verbose']
 
         self._check_params(params)
@@ -517,6 +527,75 @@ class CatBoost(_CatBoostBase):
                 if param not in self._additional_params:
                     raise CatboostError("Invalid param `{}`.".format(param))
 
+    def _process_synonyms(self, params):
+        if 'objective' in params:
+            if 'loss_function' in params:
+                raise CatboostError('only one of parameters loss_function, objective should be initialized.')
+            params['loss_function'] = params['objective']
+            del params['objective']
+
+        if 'scale_pos_weight' in params:
+            if 'loss_function' in params and params['loss_function'] != 'Logloss':
+                    raise CatboostError('scale_pos_weight is only supported for binary classification Logloss loss')
+            if 'class_weights' in params:
+                raise CatboostError('only one of parameters scale_pos_weight, class_weights should be initialized.')
+            params['class_weights'] = [1.0, params['scale_pos_weight']]
+            del params['scale_pos_weight']
+
+        if 'eta' in params:
+            if 'learning_rate' in params:
+                raise CatboostError('only one of parameters learning_rate, eta should be initialised.')
+            params['learning_rate'] = params['eta']
+            del params['eta']
+
+        if 'max_bin' in params:
+            if 'border_count' in params:
+                raise CatboostError('only one of parameters max_bin, border_count, eta should be initialised.')
+            params['learning_rate'] = params['max_bin']
+            del params['max_bin']
+
+        if 'max_depth' in params:
+            if 'depth' in params:
+                raise CatboostError('only one of parameters depth, max_depth should be initialised.')
+            params['depth'] = params['max_depth']
+            del params['max_depth']
+
+        if 'colsample_bylevel' in params:
+            if 'rsm' in params:
+                raise CatboostError('only one of parameters colsample_bylevel, rsm should be initialised.')
+            params['rsm'] = params['colsample_bylevel']
+            del params['colsample_bylevel']
+
+        if 'random_state' in params:
+            if 'random_seed' in params:
+                raise CatboostError('only one of parameters random_seed, random_state should be initialised.')
+            params['random_seed'] = params['random_state']
+            del params['random_state']
+
+        if 'reg_lambda' in params:
+            if 'l2_leaf_reg' in params:
+                raise CatboostError('only one of parameters reg_lambda, l2_leaf_reg should be initialised.')
+            params['l2_leaf_reg'] = params['reg_lambda']
+            del params['reg_lambda']
+
+        if 'n_estimators' in params:
+            if 'iterations' in params or 'num_trees' in params or 'num_boost_round' in params:
+                raise CatboostError('only one of parameters iterations, n_estimators, num_trees, num_boost_round should be initialised.')
+            params['iterations'] = params['n_estimators']
+            del params['n_estimators']
+
+        if 'num_trees' in params:
+            if 'iterations' in params or 'num_trees' in params or 'num_boost_round' in params:
+                raise CatboostError('only one of parameters iterations, n_estimators, num_trees, num_boost_round should be initialised.')
+            params['iterations'] = params['num_trees']
+            del params['num_trees']
+
+        if 'num_boost_round' in params:
+            if 'iterations' in params or 'num_trees' in params or 'num_boost_round' in params:
+                raise CatboostError('only one of parameters iterations, n_estimators, num_trees, num_boost_round should be initialised.')
+            params['iterations'] = params['num_boost_round']
+            del params['num_boost_round']
+
     def _clear_tsv_files(self, train_dir):
         for filename in ['learn_error.tsv', 'test_error.tsv', 'time_left.tsv', 'meta.tsv']:
             path = os.path.join(train_dir, filename)
@@ -530,7 +609,17 @@ class CatBoost(_CatBoostBase):
         if 'calc_feature_importance' in init_params:
             calc_feature_importance = init_params["calc_feature_importance"]
         if verbose is not None:
-            warnings.warn("The 'verbose' parameter is deprecated, use 'logging_level' parameter instead (possible values: 'Silent', 'Verbose', 'Info', 'Debug').", FutureWarning)
+            if not isinstance(verbose, bool):
+                raise CatboostError('verbose should be bool.')
+            if logging_level is not None:
+                raise CatboostError('only one of parameters logging_level, verbose should be set.')
+            if logging_level is not None:
+                raise CatboostError('only one of parameters logging_level, verbose should be set.')
+            if verbose:
+                logging_level = 'Verbose'
+            else:
+                logging_level = 'Silent'
+
         if logging_level is not None:
             params['logging_level'] = logging_level
         if use_best_model is not None:
@@ -565,7 +654,7 @@ class CatBoost(_CatBoostBase):
             try:
                 from .widget import CatboostIpythonWidget
                 widget = CatboostIpythonWidget(train_dir)
-                widget.run_update()
+                widget._run_update()
             except ImportError as e:
                 warnings.warn("For drow plots in fit() method you should install ipywidgets and ipython")
                 raise ImportError(str(e))
@@ -629,6 +718,9 @@ class CatBoost(_CatBoostBase):
                 - 'Verbose'
                 - 'Info'
                 - 'Debug'
+
+        verbose : bool, if set to True, logging_level is set to Verbose. If set
+            to False, logging_level is set to Silent.
 
         plot : bool, optional (default=False)
             If True, drow train and eval error in Jupyter notebook
@@ -821,6 +913,29 @@ class CatBoost(_CatBoostBase):
         """
         return self._eval_metrics(data, metrics, ntree_start, ntree_end, eval_period, thread_count, tmp_dir)
 
+    def create_metric_calcer(self, metrics, ntree_start=0, ntree_end=0, eval_period=1, thread_count=1, tmp_dir=None):
+        """
+        Create batch metric calcer. Could be used to aggregate metric on several pools
+        Parameters
+        ----------
+            Same as in eval_metrics except data
+        Returns
+        -------
+            BatchMetricCalcer object
+
+        Usage example
+        -------
+        # Large dataset is partitioned into parts [part1, part2]
+        model.fit(params)
+        batch_calcer = model.create_metric_calcer(['Logloss'])
+        batch_calcer.add_pool(part1)
+        batch_calcer.add_pool(part2)
+        metrics = batch_calcer.eval_metrics()
+        """
+        if not self.is_fitted_:
+            raise CatboostError("There is no trained model to use predict(). Use fit() to train model. Then use predict().")
+        return BatchMetricCalcer(self._object, metrics, ntree_start, ntree_end, eval_period, thread_count, tmp_dir)
+
     @property
     def feature_importances_(self):
         feature_importances_ = getattr(self, "_feature_importance", None)
@@ -968,7 +1083,11 @@ class CatBoost(_CatBoostBase):
         result : dict
             Dictionary of {param_key: param_value}.
         """
-        return self._get_init_params()
+        params = self._get_init_params()
+        if deep:
+            return deepcopy(params)
+        else:
+            return params
 
     def set_params(self, **params):
         """
@@ -1166,6 +1285,8 @@ class CatBoostClassifier(CatBoost):
     used_ram_limit : int, [default=None]
         Try to limit used memory (limit value in bytes).
         WARNING: Currently this option affects CTR memory usage only.
+    gpu_ram_part : int, [default=0.95]
+        How much of the GPU RAM to use for training.
     allow_writing_files : bool, [default=True]
         If this flag is set to False, no files with different diagnostic info will be created during training.
         With this flag no snapshotting can be done. Plus visualisation will not
@@ -1173,14 +1294,43 @@ class CatBoostClassifier(CatBoost):
     approx_on_full_history : bool, [default=False]
         If this flag is set to True, each approximated value is calculated using all the preceeding rows in the fold (slower, more accurate).
         If this flag is set to False, each approximated value is calculated using only the beginning 1/fold_len_multiplier fraction of the fold (faster, slightly less accurate).
+    boosting_type : string, [default='Dynamic']
+        Boosting scheme.
+        Possible values:
+            - 'Dynamic' - Gives better quality, but may slow down the training.
+            - 'Plain' - The classic gradient boosting scheme. May result in quality degradation, but does not slow down the training.
     task_type : string, [default=None]
         The calcer type used to train the model.
         Possible values:
             - 'CPU'
             - 'GPU'
-    device_config : string, [default=None]
-        GPU devices to use.
+    device_config : string, [default=None], deprecated, use devices instead
+    devices : string, [default=None], GPU devices to use.
         Format is: '0' for 1 device or '0:1:3' for multiple devices or '0-3' for range of devices.
+
+    max_depth : int, Synonym for depth.
+
+    n_estimators : int, synonym for iterations.
+
+    num_trees : int, synonym for iterations.
+
+    num_boost_round : int, synonym for iterations.
+
+    colsample_bylevel : float, synonym for rsm.
+
+    random_state : int, synonym for random_seed.
+
+    reg_lambda : float, synonym for l2_leaf_reg.
+
+    objective : string, synonym for loss_function.
+
+    eta : float, synonym for learning_rate.
+
+    max_bin : float, synonym for border_count.
+
+    scale_pos_weight : float, synonym for class_weights.
+        Can be used only for binary classification. Sets weight multiplier for
+        class 1 to scale_pos_weight value.
     """
     def __init__(
         self,
@@ -1226,16 +1376,34 @@ class CatBoostClassifier(CatBoost):
         snapshot_file=None,
         fold_len_multiplier=None,
         used_ram_limit=None,
+        gpu_ram_part=None,
         allow_writing_files=None,
         approx_on_full_history=None,
+        boosting_type=None,
         simple_ctr=None,
         combinations_ctr=None,
         per_feature_ctr=None,
         ctr_description=None,
         task_type=None,
         device_config=None,
+        devices=None,
+        max_depth=None,
+        n_estimators=None,
+        num_boost_round=None,
+        num_trees=None,
+        colsample_bylevel=None,
+        random_state=None,
+        reg_lambda=None,
+        objective=None,
+        eta=None,
+        max_bin=None,
+        scale_pos_weight=None,
         **kwargs
     ):
+        if objective is not None:
+            loss_function = objective
+            objective = None
+
         if isinstance(loss_function, str) and not self._is_classification_loss(loss_function):
             raise CatboostError("Invalid loss_function='{}': for classifier use "
                                 "Logloss, CrossEntropy, MultiClass, MultiClassOneVsAll, AUC, Accuracy, Precision, Recall, F1, TotalF1, MCC or custom objective object".format(loss_function))
@@ -1245,6 +1413,8 @@ class CatBoostClassifier(CatBoost):
         for key, value in iteritems(locals().copy()):
             if key not in not_params and value is not None:
                 params[key] = value
+
+        self._process_synonyms(params)
 
         if custom_loss is not None and custom_metric is not None:
             raise CatboostError("Custom loss and custom metric can't be set at the same time. Use custom_metric instead of custom_loss (custom_loss is deprecated)")
@@ -1521,16 +1691,33 @@ class CatBoostRegressor(CatBoost):
         snapshot_file=None,
         fold_len_multiplier=None,
         used_ram_limit=None,
+        gpu_ram_part=None,
         allow_writing_files=None,
         approx_on_full_history=None,
+        boosting_type=None,
         simple_ctr=None,
         combinations_ctr=None,
         per_feature_ctr=None,
         ctr_description=None,
         task_type=None,
         device_config=None,
+        devices=None,
+        max_depth=None,
+        n_estimators=None,
+        num_boost_round=None,
+        num_trees=None,
+        colsample_bylevel=None,
+        random_state=None,
+        reg_lambda=None,
+        objective=None,
+        eta=None,
+        max_bin=None,
         **kwargs
     ):
+        if objective is not None:
+            loss_function = objective
+            objective = None
+
         if isinstance(loss_function, str) and self._is_classification_loss(loss_function):
             raise CatboostError("Invalid loss_function={}: for Regressor use RMSE, MAE, Quantile, LogLinQuantile, Poisson, MAPE, R2.".format(loss_function))
         params = {}
@@ -1539,6 +1726,9 @@ class CatBoostRegressor(CatBoost):
         for key, value in iteritems(locals().copy()):
             if key not in not_params and value is not None:
                 params[key] = value
+
+        self._process_synonyms(params)
+
         super(CatBoostRegressor, self).__init__(params)
 
     def fit(self, X, y=None, cat_features=None, sample_weight=None, baseline=None, use_best_model=None, eval_set=None, verbose=None, logging_level=None, plot=False):
@@ -1672,9 +1862,181 @@ class CatBoostRegressor(CatBoost):
         return np.sqrt(np.mean(error))
 
 
-def cv(params, pool, fold_count=3, inverted=False, partition_random_seed=0, shuffle=True):
+def train(pool=None, params=None, dtrain=None, logging_level=None, verbose=None, iterations=None, num_boost_round=None, evals=None, eval_set=None, plot=None):
+    """
+    Train CatBoost model.
+
+    Parameters
+    ----------
+    pool : Pool or tuple (X, y)
+        Data to train on.
+
+    params : dict
+        Parameters for CatBoost.
+        If  None, all params are set to their defaults.
+        If  dict, overriding parameters present in the dict.
+
+    dtrain : Pool or tuple (X, y)
+        Synonym for pool parameter. Only one of these parameters should be set.
+
+    logging_level : string, optional (default=None)
+        Possible values:
+            - 'Silent'
+            - 'Verbose'
+            - 'Info'
+            - 'Debug'
+
+    verbose : bool
+        If set to True, then logging_level is set to Verbose, otherwise
+        logging_level is set to Silent.
+
+    iterations : int
+        Number of boosting iterations. Can be set in params dict.
+
+    num_boost_round : int
+        Synonym for iterations. Only one of these parameters should be set.
+
+    eval_set : Pool or tuple (X, y)
+        Dataset for evaluation.
+
+    evals : Pool or tuple (X, y)
+        Synonym for evals. Only one of these parameters should be set.
+
+    plot : bool, optional (default=False)
+        If True, drow train and eval error in Jupyter notebook
+
+    Returns
+    -------
+    model : CatBoost class
+    """
+
+    if dtrain is not None:
+        if pool is None:
+            pool = dtrain
+        else:
+            raise CatboostError("Only one of the parameters pool and dtrain should be set.")
+
+    if verbose is not None and logging_level is not None:
+        raise CatboostError("Only one of the parameters verbose and logging_level should be set.")
+
+    if num_boost_round is not None:
+        if iterations is None:
+            iterations = num_boost_round
+        else:
+            raise CatboostError("Only one of the parameters iterations and num_boost_round should be set.")
+    if iterations is not None:
+        params = deepcopy(params)
+        params.update({
+            'iterations': iterations
+        })
+
+    model = CatBoost(params)
+
+    model.fit(X=pool, eval_set=eval_set, verbose=verbose, logging_level=logging_level, plot=plot)
+    return model
+
+
+def cv(pool=None, params=None, dtrain=None, iterations=None, num_boost_round=None, fold_count=3, nfold=None, inverted=False, partition_random_seed=0, seed=None, shuffle=True, logging_level=None):
+    """
+    Cross-validate the CatBoost model.
+
+    Parameters
+    ----------
+    pool : Pool
+        Data to cross-validatte.
+
+    params : dict
+        Parameters for CatBoost.
+        CatBoost has many of parameters, all have default values.
+        If  None, all params still defaults.
+        If  dict, overriding some (or all) params.
+
+    dtrain : Pool or tuple (X, y)
+        Synonym for pool parameter. Only one of these parameters should be set.
+
+    iterations : int
+        Number of boosting iterations. Can be set in params dict.
+
+    num_boost_round : int
+        Synonym for iterations. Only one of these parameters should be set.
+
+    fold_count : int, optional (default=3)
+        The number of folds to split the dataset into.
+
+    nfold : int
+        Synonym for fold_count.
+
+    inverted : bool, optional (default=False)
+        Train on the test fold and evaluate the model on the training folds.
+
+    partition_random_seed : int, optional (default=0)
+        Use this as the seed value for random permutation of the data.
+        Permutation is performed before splitting the data for cross validation.
+        Each seed generates unique data splits.
+
+    seed : int, optional
+        Synonym for partition_random_seed. This parameter is deprecated. Use
+        partition_random_seed instead.
+        If both parameters are initialised partition_random_seed parameter is
+        ignored.
+
+    shuffle : bool, optional (default=True)
+        Shuffle the dataset objects before splitting into folds.
+
+    logging_level : string, optional (default=None)
+        Possible values:
+            - 'Silent'
+            - 'Verbose'
+            - 'Info'
+            - 'Debug'
+
+    Returns
+    -------
+    cv results : dict with cross-validation results
+    """
     if "use_best_model" in params:
         warnings.warn('Parameter "use_best_model" has no effect in cross-validation and is ignored')
+    if logging_level:
+        params = deepcopy(params)
+        params.update({
+            'logging_level': logging_level
+        })
+
+    if dtrain is not None:
+        if pool is None:
+            pool = dtrain
+        else:
+            raise CatboostError("Only one of the parameters pool and dtrain should be set.")
+
+    if num_boost_round is not None:
+        if iterations is None:
+            iterations = num_boost_round
+        else:
+            raise CatboostError("Only one of the parameters iterations and num_boost_round should be set.")
+
+    if iterations is not None:
+        params = deepcopy(params)
+        params.update({
+            'iterations': iterations
+        })
+
+    if seed is not None:
+        partition_random_seed = seed
 
     with log_fixup():
         return _cv(params, pool, fold_count, inverted, partition_random_seed, shuffle)
+
+
+class BatchMetricCalcer(_MetricCalcerBase):
+
+    def __init__(self, catboost, metrics, ntree_start, ntree_end, eval_period, thread_count, tmp_dir):
+        super(_MetricCalcerBase, self).__init__(catboost)
+        if tmp_dir is None:
+            tmp_dir = tempfile.mkdtemp()
+            delete_temp_dir_flag = True
+        else:
+            delete_temp_dir_flag = False
+
+        if isinstance(metrics, str):
+            metrics = [metrics]
+        self._create_calcer(metrics, ntree_start, ntree_end, eval_period, thread_count, tmp_dir, delete_temp_dir_flag)

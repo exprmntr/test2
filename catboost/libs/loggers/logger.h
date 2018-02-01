@@ -7,6 +7,9 @@
 
 #include <util/stream/format.h>
 #include <util/generic/hash.h>
+#include <util/generic/ymath.h>
+
+#include <library/json/writer/json_value.h>
 
 class IMetricEvalResult {
 public:
@@ -82,6 +85,52 @@ public:
     virtual void Flush(const int currentIteration) = 0;
 };
 
+class TJsonLoggingBackend : public ILoggingBackend {
+public:
+    explicit TJsonLoggingBackend(const TString& fileName, const NJson::TJsonValue& metaJson, int writePeriod = 1)
+        : File(fileName, CreateAlways)
+        , WritePeriod(writePeriod)
+    {
+        TString metaString = "{\n\"meta\":" + ToString<NJson::TJsonValue>(metaJson) + ",\n\"iterations\":[\n]}";
+        File.Write(metaString.data(), metaString.length());
+    }
+
+    void OutputMetric(const TString& sourceName, const IMetricEvalResult& evalResult) {
+        double metricValue = evalResult.GetMetricValue();
+        if (IsValidFloat(metricValue)) {
+            IterationJson[sourceName].AppendValue(metricValue);
+        } else {
+            IterationJson[sourceName].AppendValue(ToString<double>(metricValue));
+        }
+    }
+
+    void OutputProfile(const TProfileResults& profileResults) {
+        IterationJson["remaining_time"] = profileResults.RemainingTime;
+        IterationJson["passed_time"] = profileResults.PassedTime;
+    }
+
+    void Flush(const int currentIteration) {
+        if (IterationJson.IsDefined() && currentIteration % WritePeriod == 0) {
+            IterationJson.InsertValue("iteration", currentIteration);
+
+            TString iterationInfo = ",";
+            if (currentIteration == 0) {
+                iterationInfo.clear();
+            }
+            iterationInfo += "\n" + ToString<NJson::TJsonValue>(IterationJson) + "\n]}";
+
+            File.Seek(-3, sCur);
+            File.Write(iterationInfo.data(), iterationInfo.length());
+        }
+        IterationJson = NJson::JSON_UNDEFINED;
+    }
+
+private:
+    TFile File;
+    int WritePeriod;
+    NJson::TJsonValue IterationJson;
+};
+
 class TConsoleLoggingBackend : public ILoggingBackend {
 public:
     explicit TConsoleLoggingBackend(const bool detailedProfile, int writePeriod = 1)
@@ -125,6 +174,63 @@ private:
     bool DetailedProfile;
     int WritePeriod;
     TStringStream Stream;
+};
+
+class TProfileLoggingBackend : public ILoggingBackend {
+public:
+    explicit TProfileLoggingBackend(const TString& fileName, int iterationsCount)
+        : IterationsCount(iterationsCount)
+        , CurrentIteration(0)
+        , File(new TOFStream(fileName))
+    {
+    }
+
+    void OutputProfile(const TProfileResults& profileResults) {
+        ++CurrentIteration;
+        Stream << "\nProfile:" << Endl;
+        for (const auto& it : profileResults.OperationToTime) {
+            Stream << it.first << ": " << FloatToString(it.second, PREC_NDIGITS, 3) << " sec" << Endl;
+        }
+        Stream << "Passed: " << FloatToString(profileResults.CurrentTime, PREC_NDIGITS, 3) << " sec" << Endl;
+        if (profileResults.IsIterationGood) {
+            Stream << "\ttotal: " << HumanReadable(TDuration::Seconds(profileResults.PassedTime));
+            Stream << "\tremaining: " << HumanReadable(TDuration::Seconds(profileResults.RemainingTime));
+        }
+        if (CurrentIteration == IterationsCount) {
+            LogSummary(profileResults);
+        }
+    }
+
+    void Flush(const int currentIteration) {
+        *File << currentIteration << Stream.Str() << Endl;
+        Stream.Clear();
+    }
+
+private:
+    void LogSummary(const TProfileResults& profileResults) {
+        Stream << Endl << "\nAverage times:" << Endl;
+        if (profileResults.PassedIterations == 0) {
+            Stream << Endl << "No iterations recorded" << Endl;
+            return;
+        }
+
+        double time = 0;
+        for (const auto& it : profileResults.OperationToTimeInAllIterations) {
+            time += it.second;
+        }
+        time /= profileResults.PassedIterations;
+        Stream << "Iteration time: " << FloatToString(time, PREC_NDIGITS, 3) << " sec" << Endl;
+
+        for (const auto& it : profileResults.OperationToTimeInAllIterations) {
+            Stream << it.first << ": "
+                << FloatToString(it.second / profileResults.PassedIterations, PREC_NDIGITS, 3) << " sec" << Endl;
+        }
+    }
+
+    int IterationsCount;
+    int CurrentIteration;
+    TStringStream Stream;
+    THolder<TOFStream> File;
 };
 
 class TErrorFileLoggingBackend : public ILoggingBackend {
@@ -288,23 +394,30 @@ void WriteHistory(
     const TVector<TVector<double>>& learnErrorsHistory,
     const TVector<TVector<double>>& testErrorsHistory,
     const TVector<TVector<double>>& timeHistory,
+    const TString& learnToken,
+    const TString& testToken,
     TLogger* logger
 );
 
 void AddFileLoggers(
+    bool detailedProfile,
+    int iterationCount,
     const TString& learnErrorLogFile,
     const TString& testErrorLogFile,
     const TString& timeLogFile,
+    const TString& jsonLogFile,
+    const TString& profileLogFile,
     const TString& trainDir,
-    const bool hasTrain,
-    const bool hasTest,
+    const NJson::TJsonValue& metaJson,
+    int metricPeriod,
     TLogger* logger
 );
 
 void AddConsoleLogger(
-    const bool detailedProfile,
-    const bool hasTrain,
-    const bool hasTest,
+    const TString& learnToken,
+    const TString& testToken,
+    bool hasTrain,
+    bool hasTest,
     int metricPeriod,
     TLogger* logger
 );
@@ -313,9 +426,11 @@ void Log(
     const TVector<TString>& metricsDescription,
     const TVector<TVector<double>>& learnErrorsHistory,
     const TVector<TVector<double>>& testErrorsHistory,
-    const double bestErrorValue,
-    const int bestIteration,
+    double bestErrorValue,
+    int bestIteration,
     const TProfileResults& profileResults,
+    const TString& learnToken,
+    const TString& testToken,
     TLogger* logger
 );
 

@@ -49,7 +49,8 @@ struct TStatsIndexer {
     }
 };
 
-static void UpdateScoreBin(const TBucketStats* stats, int leafCount, const TStatsIndexer& indexer, ESplitType splitType, float l2Regularizer, TVector<TScoreBin>* scoreBin) {
+template<typename TIsPlainMode>
+static void UpdateScoreBin(const TBucketStats* stats, int leafCount, const TStatsIndexer& indexer, ESplitType splitType, float l2Regularizer, TIsPlainMode isPlainMode, TVector<TScoreBin>* scoreBin) {
     for (int leaf = 0; leaf < leafCount; ++leaf) {
         TBucketStats allStats{0, 0, 0, 0};
         for (int bucket = 0; bucket < indexer.BucketCount; ++bucket) {
@@ -63,8 +64,14 @@ static void UpdateScoreBin(const TBucketStats* stats, int leafCount, const TStat
             for (int splitIdx = 0; splitIdx < indexer.BucketCount - 1; ++splitIdx) {
                 falseStats.Add(stats[indexer.GetIndex(leaf, splitIdx)]);
                 trueStats.Remove(stats[indexer.GetIndex(leaf, splitIdx)]);
-                const double trueAvrg = CalcAverage(trueStats.SumDelta, trueStats.Count, l2Regularizer);
-                const double falseAvrg = CalcAverage(falseStats.SumDelta, falseStats.Count, l2Regularizer);
+                double trueAvrg, falseAvrg;
+                if (isPlainMode) {
+                    trueAvrg = CalcAverage(trueStats.SumWeightedDelta, trueStats.SumWeight, l2Regularizer);
+                    falseAvrg = CalcAverage(falseStats.SumWeightedDelta, falseStats.SumWeight, l2Regularizer);
+                } else {
+                    trueAvrg = CalcAverage(trueStats.SumDelta, trueStats.Count, l2Regularizer);
+                    falseAvrg = CalcAverage(falseStats.SumDelta, falseStats.Count, l2Regularizer);
+                }
                 (*scoreBin)[splitIdx].DP += CountDp(trueAvrg, trueStats) + CountDp(falseAvrg, falseStats);
                 (*scoreBin)[splitIdx].D2 += CountD2(trueAvrg, trueStats) + CountD2(falseAvrg, falseStats);
             }
@@ -77,8 +84,14 @@ static void UpdateScoreBin(const TBucketStats* stats, int leafCount, const TStat
                 }
                 falseStats.Remove(stats[indexer.GetIndex(leaf, splitIdx)]);
                 trueStats = stats[indexer.GetIndex(leaf, splitIdx)];
-                const double trueAvrg = CalcAverage(trueStats.SumDelta, trueStats.Count, l2Regularizer);
-                const double falseAvrg = CalcAverage(falseStats.SumDelta, falseStats.Count, l2Regularizer);
+                double trueAvrg, falseAvrg;
+                if (isPlainMode) {
+                    trueAvrg = CalcAverage(trueStats.SumWeightedDelta, trueStats.SumWeight, l2Regularizer);
+                    falseAvrg = CalcAverage(falseStats.SumWeightedDelta, falseStats.SumWeight, l2Regularizer);
+                } else {
+                    trueAvrg = CalcAverage(trueStats.SumDelta, trueStats.Count, l2Regularizer);
+                    falseAvrg = CalcAverage(falseStats.SumDelta, falseStats.Count, l2Regularizer);
+                }
                 (*scoreBin)[splitIdx].DP += CountDp(trueAvrg, trueStats) + CountDp(falseAvrg, falseStats);
                 (*scoreBin)[splitIdx].D2 += CountD2(trueAvrg, trueStats) + CountD2(falseAvrg, falseStats);
             }
@@ -97,12 +110,13 @@ static void SetSingleIndex(const TCalcScoreFold& fold,
     const TIndexType* indices = GetDataPtr(fold.Indices);
 
     singleIdx->yresize(docCount);
-    if (docPermutation == nullptr) {
+    if (docPermutation == nullptr || permBlockSize == docCount) {
         for (int doc = 0; doc < docCount; ++doc) {
             (*singleIdx)[doc] = indexer.GetIndex(indices[doc], bucketIndex[doc]);
         }
-    } else if (permBlockSize != FoldPermutationBlockSizeNotSet) {
+    } else if (permBlockSize > 1) {
         const int blockCount = (docCount + permBlockSize - 1) / permBlockSize;
+        Y_ASSERT(docPermutation[0] / permBlockSize + 1 == blockCount || docPermutation[0] + permBlockSize - 1 == docPermutation[permBlockSize - 1]);
         int blockStart = 0;
         while (blockStart < docCount) {
             const int blockIdx = docPermutation[blockStart] / permBlockSize;
@@ -213,12 +227,23 @@ static TVector<double> CalcScoreImpl(const TIsCaching& isCaching,
             } else {
                 Fill(stats, stats + indexer.CalcSize(depth), TBucketStats{0, 0, 0, 0});
             }
-            UpdateDeltaCount(singleIdx, GetDataPtr(bt.Derivatives[dim]), GetDataPtr(fold.LearnWeights), bt.BodyFinish, stats);
-            UpdateWeighted(singleIdx, GetDataPtr(bt.WeightedDer[dim]), GetDataPtr(fold.SampleWeights), bt.BodyFinish, bt.TailFinish, stats);
+
+            const bool isPlainMode = IsPlainMode(fitParams.BoostingOptions->BoostingType);
+            if (isPlainMode) {
+                UpdateWeighted(singleIdx, GetDataPtr(bt.WeightedDer[dim]), GetDataPtr(fold.SampleWeights), 0, bt.TailFinish, stats);
+            } else {
+                UpdateDeltaCount(singleIdx, GetDataPtr(bt.Derivatives[dim]), GetDataPtr(fold.LearnWeights), bt.BodyFinish, stats);
+                UpdateWeighted(singleIdx, GetDataPtr(bt.WeightedDer[dim]), GetDataPtr(fold.SampleWeights), bt.BodyFinish, bt.TailFinish, stats);
+            }
+
             if (isCaching) {
                 FixUpStats(depth, indexer, fold.SmallestSplitSideValue, stats);
             }
-            UpdateScoreBin(stats, leafCount, indexer, split.Type, l2Regularizer, &scoreBin);
+            if (isPlainMode) {
+                UpdateScoreBin(stats, leafCount, indexer, split.Type, l2Regularizer, /*isPlainMode=*/std::true_type(), &scoreBin);
+            } else {
+                UpdateScoreBin(stats, leafCount, indexer, split.Type, l2Regularizer, /*isPlainMode=*/std::false_type(), &scoreBin);
+            }
         }
     }
     TVector<double> result(indexer.BucketCount - 1);

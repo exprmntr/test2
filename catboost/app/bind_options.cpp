@@ -170,6 +170,18 @@ void ParseCommandLine(int argc, const char* argv[],
             (*plainJsonPtr)["test_error_log"] = name;
         });
 
+    parser.AddLongOption("json-log", "json to log metrics and time information")
+        .RequiredArgument("file")
+        .Handler1T<TString>([plainJsonPtr](const TString& name) {
+            (*plainJsonPtr)["json_log"] = name;
+        });
+
+    parser.AddLongOption("profile-log", "file to log profile information")
+        .RequiredArgument("file")
+        .Handler1T<TString>([plainJsonPtr](const TString& name) {
+            (*plainJsonPtr)["profile_log"] = name;
+        });
+
     parser.AddLongOption("use-best-model", "save all trees until best iteration on test")
         .NoArgument()
         .Handler0([plainJsonPtr]() {
@@ -366,7 +378,7 @@ void ParseCommandLine(int argc, const char* argv[],
     parser
         .AddLongOption("bootstrap-type")
         .RequiredArgument("STRING")
-        .Help("Could be changed for GPU only. Bootstrap type. Change default way of sampling documents weights. One of"
+        .Help("Bootstrap type. Change default way of sampling documents weights. One of"
               " Poisson,"
               " Bayesian,"
               " Bernoulli,"
@@ -381,7 +393,7 @@ void ParseCommandLine(int argc, const char* argv[],
         .Handler1T<float>([plainJsonPtr](float baggingTemperature) {
             (*plainJsonPtr)["bagging_temperature"] = baggingTemperature;
         })
-        .Help("Controls intensity of Bayesian bagging. The higher the temperature the more aggressive bagging is. Typical values are in range [0, 1] (0 - no bagging, 1 - default). Available for Bayessian bootstap only");
+        .Help("Controls intensity of Bayesian bagging. The higher the temperature the more aggressive bagging is. Typical values are in range [0, 1] (0 - no bagging, 1 - default). Available for Bayesian bootstap only");
 
     parser.AddLongOption("sampling-frequency")
         .RequiredArgument("string")
@@ -391,12 +403,12 @@ void ParseCommandLine(int argc, const char* argv[],
         .Help("Controls how frequently to sample weights and objects when constructing trees. Possible values are PerTree and PerTreeLevel.");
 
     parser
-        .AddLongOption("sample-rate")
+        .AddLongOption("subsample")
         .RequiredArgument("Float")
         .Handler1T<float>([plainJsonPtr](float rate) {
-            (*plainJsonPtr)["sample_rate"] = rate;
+            (*plainJsonPtr)["subsample"] = rate;
         })
-        .Help("Controls sample rate for bagging. Could be used iff bootstrap-type is Poisson, Bernoulli. Possible values are from (0, 1]; 1 by default."
+        .Help("Controls sample rate for bagging. Could be used iff bootstrap-type is Poisson, Bernoulli. Possible values are from (0, 1]; 0.66 by default."
         );
 
     parser

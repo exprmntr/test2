@@ -24,9 +24,9 @@ TMetricHolder TMetric::EvalPairwise(const TVector<TVector<double>>& /*approx*/,
 TMetricHolder TMetric::EvalQuerywise(const TVector<TVector<double>>& /*approx*/,
                                     const TVector<float>& /*target*/,
                                     const TVector<float>& /*weight*/,
-                                    const TVector<ui32>& /*queriesId*/,
-                                    const THashMap<ui32, ui32>& /*queriesSize*/,
-                                    int /*begin*/, int /*end*/) const {
+                                    const TVector<TQueryInfo>& /*queriesInfo*/,
+                                    int /*queryStartIndex*/,
+                                    int /*queryEndIndex*/) const {
     CB_ENSURE(false, "This eval is only for Querywise");
 }
 
@@ -51,9 +51,9 @@ TMetricHolder TPairwiseMetric::Eval(const TVector<TVector<double>>& /*approx*/,
 TMetricHolder TPairwiseMetric::EvalQuerywise(const TVector<TVector<double>>& /*approx*/,
                                             const TVector<float>& /*target*/,
                                             const TVector<float>& /*weight*/,
-                                            const TVector<ui32>& /*queriesId*/,
-                                            const THashMap<ui32, ui32>& /*queriesSize*/,
-                                            int /*begin*/, int /*end*/) const {
+                                            const TVector<TQueryInfo>& /*queriesInfo*/,
+                                            int /*queryStartIndex*/,
+                                            int /*queryEndIndex*/) const {
     CB_ENSURE(false, "This eval is not for Pairwise");
 }
 
@@ -97,11 +97,10 @@ TCrossEntropyMetric::TCrossEntropyMetric(ELossFunction lossFunction)
     Y_ASSERT(lossFunction == ELossFunction::Logloss || lossFunction == ELossFunction::CrossEntropy);
 }
 
-TMetricHolder TCrossEntropyMetric::Eval(const TVector<TVector<double>>& approx,
-                                       const TVector<float>& target,
-                                       const TVector<float>& weight,
-                                       int begin, int end,
-                                       NPar::TLocalExecutor& executor) const {
+TMetricHolder TCrossEntropyMetric::EvalSingleThread(const TVector<TVector<double>>& approx,
+                                                    const TVector<float>& target,
+                                                    const TVector<float>& weight,
+                                                    int begin, int end) const {
     // p * log(1/(1+exp(-f))) + (1-p) * log(1 - 1/(1+exp(-f))) =
     // p * log(exp(f) / (exp(f) + 1)) + (1-p) * log(exp(-f)/(1+exp(-f))) =
     // p * log(exp(f) / (exp(f) + 1)) + (1-p) * log(1/(exp(f) + 1)) =
@@ -114,33 +113,17 @@ TMetricHolder TCrossEntropyMetric::Eval(const TVector<TVector<double>>& approx,
     const auto& approxVec = approx.front();
     Y_ASSERT(approxVec.size() == target.size());
 
-    NPar::TLocalExecutor::TExecRangeParams blockParams(begin, end);
-    blockParams.SetBlockCount(executor.GetThreadCount() + 1);
-    TVector<TMetricHolder> errorHolders(blockParams.GetBlockCount());
-
-    executor.ExecRange([&](int blockId) {
-        TMetricHolder holder;
-        const double* approxPtr = approxVec.data();
-        const float* targetPtr = target.data();
-
-        NPar::TLocalExecutor::BlockedLoopBody(blockParams, [approxPtr, targetPtr, &holder, &weight](int i) {
-            float w = weight.empty() ? 1 : weight[i];
-            const double approxExp = exp(approxPtr[i]);
-            const float prob = targetPtr[i];
-            holder.Error += w * (log(1 + approxExp) - prob * approxPtr[i]);
-            holder.Weight += w;
-        })(blockId);
-
-        errorHolders[blockId] = holder;
-    },
-                       0, blockParams.GetBlockCount(), NPar::TLocalExecutor::WAIT_COMPLETE);
-
-    TMetricHolder error;
-    for (const auto& eh : errorHolders) {
-        error.Add(eh);
+    TMetricHolder holder;
+    const double* approxPtr = approxVec.data();
+    const float* targetPtr = target.data();
+    for (int i = begin; i < end; ++i) {
+        float w = weight.empty() ? 1 : weight[i];
+        const double approxExp = exp(approxPtr[i]);
+        const float prob = targetPtr[i];
+        holder.Error += w * (log(1 + approxExp) - prob * approxPtr[i]);
+        holder.Weight += w;
     }
-
-    return error;
+    return holder;
 }
 
 TString TCrossEntropyMetric::GetDescription() const {
@@ -153,11 +136,10 @@ bool TCrossEntropyMetric::IsMaxOptimal() const {
 
 /* RMSE */
 
-TMetricHolder TRMSEMetric::Eval(const TVector<TVector<double>>& approx,
-                               const TVector<float>& target,
-                               const TVector<float>& weight,
-                               int begin, int end,
-                               NPar::TLocalExecutor& /* executor */) const {
+TMetricHolder TRMSEMetric::EvalSingleThread(const TVector<TVector<double>>& approx,
+                                            const TVector<float>& target,
+                                            const TVector<float>& weight,
+                                            int begin, int end) const {
     CB_ENSURE(approx.size() == 1, "Metric RMSE supports only single-dimensional data");
 
     const auto& approxVec = approx.front();
@@ -196,11 +178,10 @@ TQuantileMetric::TQuantileMetric(ELossFunction lossFunction, double alpha)
               "Alpha parameter for quantile metric should be in interval [0, 1]");
 }
 
-TMetricHolder TQuantileMetric::Eval(const TVector<TVector<double>>& approx,
-                                   const TVector<float>& target,
-                                   const TVector<float>& weight,
-                                   int begin, int end,
-                                   NPar::TLocalExecutor& /* executor */) const {
+TMetricHolder TQuantileMetric::EvalSingleThread(const TVector<TVector<double>>& approx,
+                                                const TVector<float>& target,
+                                                const TVector<float>& weight,
+                                                int begin, int end) const {
     CB_ENSURE(approx.size() == 1, "Metric quantile supports only single-dimensional data");
 
     const auto& approxVec = approx.front();
@@ -242,11 +223,10 @@ TLogLinQuantileMetric::TLogLinQuantileMetric(double alpha)
               "Alpha parameter for log-linear quantile metric should be in interval (0, 1)");
 }
 
-TMetricHolder TLogLinQuantileMetric::Eval(const TVector<TVector<double>>& approx,
-                                         const TVector<float>& target,
-                                         const TVector<float>& weight,
-                                         int begin, int end,
-                                         NPar::TLocalExecutor& /* executor */) const {
+TMetricHolder TLogLinQuantileMetric::EvalSingleThread(const TVector<TVector<double>>& approx,
+                                                      const TVector<float>& target,
+                                                      const TVector<float>& weight,
+                                                      int begin, int end) const {
     CB_ENSURE(approx.size() == 1, "Metric log-linear quantile supports only single-dimensional data");
 
     const auto& approxVec = approx.front();
@@ -275,11 +255,10 @@ bool TLogLinQuantileMetric::IsMaxOptimal() const {
 
 /* MAPE */
 
-TMetricHolder TMAPEMetric::Eval(const TVector<TVector<double>>& approx,
-                               const TVector<float>& target,
-                               const TVector<float>& weight,
-                               int begin, int end,
-                               NPar::TLocalExecutor& /* executor */) const {
+TMetricHolder TMAPEMetric::EvalSingleThread(const TVector<TVector<double>>& approx,
+                                            const TVector<float>& target,
+                                            const TVector<float>& weight,
+                                            int begin, int end) const {
     CB_ENSURE(approx.size() == 1, "Metric MAPE quantile supports only single-dimensional data");
 
     const auto& approxVec = approx.front();
@@ -305,11 +284,10 @@ bool TMAPEMetric::IsMaxOptimal() const {
 
 /* Poisson */
 
-TMetricHolder TPoissonMetric::Eval(const TVector<TVector<double>>& approx,
-                                  const TVector<float>& target,
-                                  const TVector<float>& weight,
-                                  int begin, int end,
-                                  NPar::TLocalExecutor& /* executor */) const {
+TMetricHolder TPoissonMetric::EvalSingleThread(const TVector<TVector<double>>& approx,
+                                               const TVector<float>& target,
+                                               const TVector<float>& weight,
+                                               int begin, int end) const {
     // Error function:
     // Sum_d[approx(d) - target(d) * log(approx(d))]
     // approx(d) == exp(Sum(tree_value))
@@ -339,11 +317,10 @@ bool TPoissonMetric::IsMaxOptimal() const {
 
 /* MultiClass */
 
-TMetricHolder TMultiClassMetric::Eval(const TVector<TVector<double>>& approx,
-                                     const TVector<float>& target,
-                                     const TVector<float>& weight,
-                                     int begin, int end,
-                                     NPar::TLocalExecutor& /* executor */) const {
+TMetricHolder TMultiClassMetric::EvalSingleThread(const TVector<TVector<double>>& approx,
+                                                  const TVector<float>& target,
+                                                  const TVector<float>& weight,
+                                                  int begin, int end) const {
     Y_ASSERT(target.ysize() == approx[0].ysize());
     int approxDimension = approx.ysize();
 
@@ -385,11 +362,10 @@ bool TMultiClassMetric::IsMaxOptimal() const {
 
 /* MultiClassOneVsAll */
 
-TMetricHolder TMultiClassOneVsAllMetric::Eval(const TVector<TVector<double>>& approx,
-                                             const TVector<float>& target,
-                                             const TVector<float>& weight,
-                                             int begin, int end,
-                                             NPar::TLocalExecutor& /* executor */) const {
+TMetricHolder TMultiClassOneVsAllMetric::EvalSingleThread(const TVector<TVector<double>>& approx,
+                                                          const TVector<float>& target,
+                                                          const TVector<float>& weight,
+                                                          int begin, int end) const {
     Y_ASSERT(target.ysize() == approx[0].ysize());
     int approxDimension = approx.ysize();
 
@@ -457,29 +433,25 @@ bool TPairLogitMetric::IsMaxOptimal() const {
 
 /* QueryRMSE */
 
-// TODO(nikitxskv): queriesSize will result in a lot of cache misses. We loop
-// through queries sequentially, so why use hash map?
 TMetricHolder TQueryRMSEMetric::EvalQuerywise(const TVector<TVector<double>>& approx,
                                          const TVector<float>& target,
                                          const TVector<float>& weight,
-                                         const TVector<ui32>& queriesId,
-                                         const THashMap<ui32, ui32>& queriesSize,
-                                         int begin, int end) const {
+                                         const TVector<TQueryInfo>& queriesInfo,
+                                         int queryStartIndex,
+                                         int queryEndIndex) const {
     CB_ENSURE(approx.size() == 1, "Metric QueryRMSE supports only single-dimensional data");
 
-    int offset = 0;
     TMetricHolder error;
-    while (begin + offset < end) {
-        ui32 querySize = queriesSize.find(queriesId[begin + offset])->second;
-        double queryAvrg = CalcQueryAvrg(begin + offset, querySize, approx[0], target, weight);
-        for (ui32 docId = begin + offset; docId < begin + offset + querySize; ++docId) {
+    for (int queryIndex = queryStartIndex; queryIndex < queryEndIndex; ++queryIndex) {
+        int begin = queriesInfo[queryIndex].Begin;
+        int end = queriesInfo[queryIndex].End;
+        double queryAvrg = CalcQueryAvrg(begin, end - begin, approx[0], target, weight);
+        for (int docId = begin; docId < end; ++docId) {
             float w = weight.empty() ? 1 : weight[docId];
             error.Error += (Sqr(target[docId] - approx[0][docId] - queryAvrg)) * w;
             error.Weight += w;
         }
-        offset += querySize;
     }
-
     return error;
 }
 
@@ -684,11 +656,10 @@ bool TAUCMetric::IsMaxOptimal() const {
 
 /* Accuracy */
 
-TMetricHolder TAccuracyMetric::Eval(const TVector<TVector<double>>& approx,
-                                   const TVector<float>& target,
-                                   const TVector<float>& weight,
-                                   int begin, int end,
-                                   NPar::TLocalExecutor& /* executor */) const {
+TMetricHolder TAccuracyMetric::EvalSingleThread(const TVector<TVector<double>>& approx,
+                                                const TVector<float>& target,
+                                                const TVector<float>& weight,
+                                                int begin, int end) const {
     Y_ASSERT(target.ysize() == approx[0].ysize());
 
     TMetricHolder error;
@@ -981,11 +952,10 @@ TMetricHolder TCustomMetric::EvalPairwise(const TVector<TVector<double>>& /*appr
 TMetricHolder TCustomMetric::EvalQuerywise(const TVector<TVector<double>>& /*approx*/,
                                           const TVector<float>& /*target*/,
                                           const TVector<float>& /*weight*/,
-                                          const TVector<ui32>& /*queriesId*/,
-                                          const THashMap<ui32, ui32>& /*queriesSize*/,
-                                          int /*begin*/, int /*end*/) const {
-    // TODO(annaveronika): change exception.
-    CB_ENSURE(false, "This eval is only for QueryRMSE");
+                                          const TVector<TQueryInfo>& /*queriesInfo*/,
+                                          int /*queryStartIndex*/,
+                                          int /*queryEndIndex*/) const {
+    CB_ENSURE(false, "This eval is only for querywise metrics");
 }
 
 TString TCustomMetric::GetDescription() const {
@@ -1045,9 +1015,9 @@ TUserDefinedQuerywiseMetric::TUserDefinedQuerywiseMetric(const THashMap<TString,
 TMetricHolder TUserDefinedQuerywiseMetric::EvalQuerywise(const TVector<TVector<double>>& /*approx*/,
                                                          const TVector<float>& /*target*/,
                                                          const TVector<float>& /*weight*/,
-                                                         const TVector<ui32>& /*queriesId*/,
-                                                         const THashMap<ui32, ui32>& /*queriesSize*/,
-                                                         int /*begin*/, int /*end*/) const {
+                                                         const TVector<TQueryInfo>& /*queriesInfo*/,
+                                                         int /*queryStartIndex*/,
+                                                         int /*queryEndIndex*/) const {
     CB_ENSURE(false, "Not implemented for TUserDefinedQuerywiseMetric metric.");
     TMetricHolder metric;
     return metric;
@@ -1067,31 +1037,29 @@ bool TUserDefinedQuerywiseMetric::IsMaxOptimal() const {
 TMetricHolder TQueryAverage::EvalQuerywise(const TVector<TVector<double>>& approx,
                                          const TVector<float>& target,
                                          const TVector<float>& weight,
-                                         const TVector<ui32>& queriesId,
-                                         const THashMap<ui32, ui32>& queriesSize,
-                                         int begin, int end) const {
+                                         const TVector<TQueryInfo>& queriesInfo,
+                                         int queryStartIndex,
+                                         int queryEndIndex) const {
     CB_ENSURE(approx.size() == 1, "Metric QueryAverage supports only single-dimensional data");
     Y_UNUSED(weight);
 
-    int offset = 0;
     TMetricHolder error;
 
     TVector<std::pair<double, int>> approxWithDoc;
-    while (begin + offset < end) {
-        // TODO(nikitxskv): remove map.
-        ui32 querySize = queriesSize.find(queriesId[begin + offset])->second;
-        auto startIdx = begin + offset;
-        auto endIdx = startIdx + querySize;
+    for (int queryIndex = queryStartIndex; queryIndex < queryEndIndex; ++queryIndex) {
+        auto startIdx = queriesInfo[queryIndex].Begin;
+        auto endIdx = queriesInfo[queryIndex].End;
+        auto querySize = endIdx - startIdx;
 
         double targetSum = 0;
         if ((int)querySize <= TopSize) {
-            for (ui32 docId = startIdx; docId < endIdx; ++docId) {
+            for (int docId = startIdx; docId < endIdx; ++docId) {
                 targetSum += target[docId];
             }
             error.Error += targetSum / querySize;
         } else {
             approxWithDoc.yresize(querySize);
-            for (ui32 i = 0; i < querySize; ++i) {
+            for (int i = 0; i < querySize; ++i) {
                 int docId = startIdx + i;
                 approxWithDoc[i].first = approx[0][docId];
                 approxWithDoc[i].second = docId;;
@@ -1103,11 +1071,8 @@ TMetricHolder TQueryAverage::EvalQuerywise(const TVector<TVector<double>>& appro
             }
             error.Error += targetSum / TopSize;
         }
-
         error.Weight += 1;
-        offset += querySize;
     }
-
     return error;
 }
 
@@ -1285,19 +1250,33 @@ TVector<THolder<IMetric>> CreateMetricFromDescription(const NCatboostOptions::TL
     return CreateMetric(metric, params, approxDimension);
 }
 
-TVector<THolder<IMetric>> CreateMetrics(const NCatboostOptions::TLossDescription& evalMetric, const TMaybe<TCustomMetricDescriptor>& evalMetricDescriptor,
-                                        const TVector<NCatboostOptions::TLossDescription>& customLoss, int approxDimension) {
+TVector<THolder<IMetric>> CreateMetrics(
+    const NCatboostOptions::TOption<NCatboostOptions::TLossDescription>& lossFunctionOption,
+    const NCatboostOptions::TCpuOnlyOption<NCatboostOptions::TMetricOptions>& evalMetricOptions,
+    const TMaybe<TCustomMetricDescriptor>& evalMetricDescriptor,
+    int approxDimension
+) {
     TVector<THolder<IMetric>> errors;
-    if (evalMetric.GetLossFunction() == ELossFunction::Custom) {
-        errors.emplace_back(new TCustomMetric(*evalMetricDescriptor));
-    } else {
-        TVector<THolder<IMetric>> createdMetrics = CreateMetricFromDescription(evalMetric, approxDimension);
+
+    if(evalMetricOptions->EvalMetric.IsSet()) {
+        if (evalMetricOptions->EvalMetric->GetLossFunction() == ELossFunction::Custom) {
+            errors.emplace_back(new TCustomMetric(*evalMetricDescriptor));
+        } else {
+            TVector<THolder<IMetric>> createdMetrics = CreateMetricFromDescription(evalMetricOptions->EvalMetric, approxDimension);
+            for (auto& metric : createdMetrics) {
+                errors.push_back(std::move(metric));
+            }
+        }
+    }
+
+    if (lossFunctionOption->GetLossFunction() != ELossFunction::Custom) {
+        TVector<THolder<IMetric>> createdMetrics = CreateMetricFromDescription(lossFunctionOption, approxDimension);
         for (auto& metric : createdMetrics) {
             errors.push_back(std::move(metric));
         }
     }
 
-    for (const auto& description : customLoss) {
+    for (const auto& description : evalMetricOptions->CustomMetrics.Get()) {
         TVector<THolder<IMetric>> createdMetrics = CreateMetricFromDescription(description, approxDimension);
         for (auto& metric : createdMetrics) {
             errors.push_back(std::move(metric));
@@ -1348,4 +1327,25 @@ TVector<TString> GetMetricsDescription(const TVector<THolder<IMetric>>& metrics)
          result.push_back(metric->GetDescription());
      }
      return result;
+}
+
+double EvalErrors(
+    const TVector<TVector<double>>& avrgApprox,
+    const TVector<float>& target,
+    const TVector<float>& weight,
+    const TVector<TQueryInfo>& queriesInfo,
+    const TVector<TPair>& pairs,
+    const THolder<IMetric>& error,
+    int queryStartIndex,
+    int queryEndIndex,
+    int begin,
+    int end,
+    NPar::TLocalExecutor* localExecutor
+) {
+    return error->GetFinalError(
+        error->GetErrorType() == EErrorType::PerObjectError ?
+            error->Eval(avrgApprox, target, weight, begin, end, *localExecutor) :
+            error->GetErrorType() == EErrorType::PairwiseError ?
+                error->EvalPairwise(avrgApprox, pairs, begin, end):
+                error->EvalQuerywise(avrgApprox, target, weight, queriesInfo, queryStartIndex, queryEndIndex));
 }

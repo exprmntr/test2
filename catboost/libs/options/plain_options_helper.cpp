@@ -92,6 +92,7 @@ namespace NCatboostOptions {
         CopyOption(plainOptions, "train_dir", &outputFilesJson, &seenKeys);
         CopyOption(plainOptions, "name", &outputFilesJson, &seenKeys);
         CopyOption(plainOptions, "meta", &outputFilesJson, &seenKeys);
+        CopyOption(plainOptions, "json_log", &outputFilesJson, &seenKeys);
         CopyOption(plainOptions, "learn_error_log", &outputFilesJson, &seenKeys);
         CopyOption(plainOptions, "test_error_log", &outputFilesJson, &seenKeys);
         CopyOption(plainOptions, "time_left_log", &outputFilesJson, &seenKeys);
@@ -150,7 +151,7 @@ namespace NCatboostOptions {
 
         CopyOptionWithNewKey(plainOptions, "bootstrap_type", "type", &bootstrapOptions, &seenKeys);
         CopyOption(plainOptions, "bagging_temperature", &bootstrapOptions, &seenKeys);
-        CopyOption(plainOptions, "sample_rate", &bootstrapOptions, &seenKeys);
+        CopyOption(plainOptions, "subsample", &bootstrapOptions, &seenKeys);
 
         //cat-features
         auto& ctrOptions = trainOptions["cat_feature_params"];
@@ -197,6 +198,7 @@ namespace NCatboostOptions {
         systemOptions.SetType(NJson::JSON_MAP);
 
         CopyOption(plainOptions, "thread_count", &systemOptions, &seenKeys);
+        CopyOptionWithNewKey(plainOptions, "device_config", "devices", &systemOptions, &seenKeys);
         CopyOption(plainOptions, "devices", &systemOptions, &seenKeys);
         CopyOption(plainOptions, "used_ram_limit", &systemOptions, &seenKeys);
         CopyOption(plainOptions, "gpu_ram_part", &systemOptions, &seenKeys);

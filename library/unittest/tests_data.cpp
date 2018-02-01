@@ -77,6 +77,7 @@ class TPortManager::TPortManagerImpl {
 
         bool IsLocked() const;
         ui16 GetPort() const;
+
     private:
         TFsPath Path;
         ui16 Port;
@@ -86,7 +87,9 @@ class TPortManager::TPortManagerImpl {
     };
 
 public:
-    TPortManagerImpl(const TString& syncDir): ValidPortsCount(0) {
+    TPortManagerImpl(const TString& syncDir)
+        : ValidPortsCount(0)
+    {
         SyncDir = GetEnv("PORT_SYNC_PATH", syncDir);
         if (IsSyncDirSet())
             NFs::MakeDirectoryRecursive(SyncDir);
@@ -130,7 +133,10 @@ public:
             if (IsSyncDirSet() && !LockPort(port))
                 continue;
 
-            Sockets.push_back(std::move(sock));
+            {
+                TGuard<TMutex> g(Lock);
+                Sockets.push_back(std::move(sock));
+            }
             return port;
         }
         ythrow yexception() << "Failed to find port";

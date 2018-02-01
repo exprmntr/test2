@@ -10,7 +10,7 @@ LICENSE(
 
 PEERDIR(
     contrib/python/backports-shutil_get_terminal_size
-    contrib/python/decorator-4.0.6
+    contrib/python/decorator
     contrib/python/pickleshare-0.6
     contrib/python/simplegeneric-0.8.1
     contrib/python/traitlets
@@ -22,7 +22,7 @@ PEERDIR(
 
 IF (OS_WINDOWS)
     PEERDIR(
-        contrib/python/colorama-0.3.6
+        contrib/python/colorama
     )
 ELSE ()
     PEERDIR(

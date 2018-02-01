@@ -3,9 +3,7 @@
 #include "score_calcer.h"
 #include "tree_print.h"
 
-
 #include <catboost/libs/logging/profile_info.h>
-
 #include <catboost/libs/helpers/interrupt.h>
 
 #include <library/dot_product/dot_product.h>
@@ -22,28 +20,33 @@ void TrimOnlineCTRcache(const TVector<TFold*>& folds) {
     }
 }
 
-static void AssignRandomWeights(int learnSampleCount,
-                                TLearnContext* ctx,
-                                TFold* fold) {
-    TVector<float> sampleWeights;
-    sampleWeights.yresize(learnSampleCount);
+static void GenerateRandomWeights(int learnSampleCount,
+                                  TLearnContext* ctx,
+                                  TFold* fold) {
+    const float baggingTemperature = ctx->Params.ObliviousTreeOptions->BootstrapConfig->GetBaggingTemperature();
+    if (baggingTemperature == 0) {
+        return;
+    }
 
     const ui64 randSeed = ctx->Rand.GenRand();
     NPar::TLocalExecutor::TExecRangeParams blockParams(0, learnSampleCount);
-    blockParams.SetBlockSize(10000);
+    blockParams.SetBlockSize(1000);
     ctx->LocalExecutor.ExecRange([&](int blockIdx) {
         TFastRng64 rand(randSeed + blockIdx);
         rand.Advance(10); // reduce correlation between RNGs in different threads
-        const float baggingTemperature = ctx->Params.ObliviousTreeOptions->BootstrapConfig->GetBaggingTemperature();
-        float* sampleWeightsData = sampleWeights.data();
-        NPar::TLocalExecutor::BlockedLoopBody(blockParams, [&rand, sampleWeightsData, baggingTemperature](int i) {
+        float* sampleWeightsData = fold->SampleWeights.data();
+        NPar::TLocalExecutor::BlockedLoopBody(blockParams, [=,&rand](int i) {
             const float w = -FastLogf(rand.GenRandReal1() + 1e-100);
             sampleWeightsData[i] = powf(w, baggingTemperature);
         })(blockIdx);
     }, 0, blockParams.GetBlockCount(), NPar::TLocalExecutor::WAIT_COMPLETE);
+}
 
+
+static void CalcWeightedData(int learnSampleCount,
+                                TLearnContext* ctx,
+                                TFold* fold) {
     TFold& ff = *fold;
-    ff.AssignPermuted(sampleWeights, &ff.SampleWeights);
     if (!ff.LearnWeights.empty()) {
         for (int i = 0; i < learnSampleCount; ++i) {
             ff.SampleWeights[i] *= ff.LearnWeights[i];
@@ -52,13 +55,17 @@ static void AssignRandomWeights(int learnSampleCount,
 
     const int approxDimension = ff.GetApproxDimension();
     for (TFold::TBodyTail& bt : ff.BodyTailArr) {
+        int begin = 0;
+        if (!IsPlainMode(ctx->Params.BoostingOptions->BoostingType)) {
+            begin = bt.BodyFinish;
+        }
         for (int dim = 0; dim < approxDimension; ++dim) {
             double* weightedDerData = bt.WeightedDer[dim].data();
             const double* derData = bt.Derivatives[dim].data();
             const float* sampleWeightsData = ff.SampleWeights.data();
             ctx->LocalExecutor.ExecRange([=](int z) {
                 weightedDerData[z] = derData[z] * sampleWeightsData[z];
-            }, NPar::TLocalExecutor::TExecRangeParams(bt.BodyFinish, bt.TailFinish).SetBlockSize(4000)
+            }, NPar::TLocalExecutor::TExecRangeParams(begin, bt.TailFinish).SetBlockSize(4000)
              , NPar::TLocalExecutor::WAIT_COMPLETE);
         }
     }
@@ -82,7 +89,6 @@ struct TCandidatesInfoList {
     // TODO(annaveronika): put projection out, because currently it's not clear.
     TVector<TCandidateInfo> Candidates;
     bool ShouldDropCtrAfterCalc = false;
-    size_t ResultingCtrTableSize = 0;
 };
 
 using TCandidateList = TVector<TCandidatesInfoList>;
@@ -319,6 +325,26 @@ static void SelectCtrsToDropAfterCalc(size_t memoryLimit,
     }
 }
 
+static void Bootstrap(const NCatboostOptions::TOption<NCatboostOptions::TBootstrapConfig>& samplingConfig,
+               const TVector<TIndexType>& indices,
+               int learnSampleCount,
+               TFold* fold,
+               TLearnContext* ctx) {
+    switch (samplingConfig->GetBootstrapType()) {
+        case EBootstrapType::Bernoulli:
+            break;
+        case EBootstrapType::Bayesian:
+            GenerateRandomWeights(learnSampleCount, ctx, fold);
+            break;
+        case EBootstrapType::No:
+            break;
+        default:
+            CB_ENSURE(false, "Not supported bootstrap type on CPU: " << samplingConfig->GetBootstrapType());
+    }
+    CalcWeightedData(learnSampleCount, ctx, fold);
+    ctx->SampledDocs.Sample(*fold, indices, &ctx->Rand, &ctx->LocalExecutor);
+}
+
 void GreedyTensorSearch(const TTrainData& data,
                         const TVector<int>& splitCounts,
                         double modelLength,
@@ -333,9 +359,9 @@ void GreedyTensorSearch(const TTrainData& data,
     MATRIXNET_INFO_LOG << "\n";
 
     const bool isSamplingPerTree = IsSamplingPerTree(ctx->Params.ObliviousTreeOptions.Get());
+    const auto& samplingConfig = ctx->Params.ObliviousTreeOptions->BootstrapConfig;
     if (isSamplingPerTree) {
-        AssignRandomWeights(data.LearnSampleCount, ctx, fold); // TODO(espetrov): merge with sampling
-        ctx->SampledDocs.Sample(*fold, indices, ctx->Params.ObliviousTreeOptions->BootstrapConfig->GetTakenFraction(), &ctx->Rand, &ctx->LocalExecutor);
+        Bootstrap(samplingConfig, indices, data.LearnSampleCount, fold, ctx);
         ctx->PrevTreeLevelStats.GarbageCollect();
     }
 
@@ -351,13 +377,12 @@ void GreedyTensorSearch(const TTrainData& data,
 
         CheckInterrupted(); // check after long-lasting operation
         if (!isSamplingPerTree) {
-            AssignRandomWeights(data.LearnSampleCount, ctx, fold); // TODO(espetrov): merge with sampling
-            ctx->SampledDocs.Sample(*fold, indices, ctx->Params.ObliviousTreeOptions->BootstrapConfig->GetTakenFraction(), &ctx->Rand, &ctx->LocalExecutor);
+            Bootstrap(samplingConfig, indices, data.LearnSampleCount, fold, ctx);
         }
-        profile.AddOperation(TStringBuilder() << "AssignRandomWeights, depth " << curDepth);
+        profile.AddOperation(TStringBuilder() << "Bootstrap, depth " << curDepth);
         double scoreStDev = ctx->Params.ObliviousTreeOptions->RandomStrength * CalcScoreStDev(*fold) * CalcScoreStDevMult(data.LearnSampleCount, modelLength);
 
-        TVector<size_t> candLeafCount(candList.ysize(), 1);
+        TVector<size_t> candFeatureValueCount(candList.ysize(), 1);
         const ui64 randSeed = ctx->Rand.GenRand();
         CB_ENSURE(static_cast<ui32>(ctx->LocalExecutor.GetThreadCount()) == ctx->Params.SystemOptions->NumThreads - 1);
         ctx->LocalExecutor.ExecRange([&](int id) {
@@ -369,10 +394,9 @@ void GreedyTensorSearch(const TTrainData& data,
                                       *fold,
                                       proj,
                                       ctx,
-                                      &fold->GetCtrRef(proj),
-                                      &candidate.ResultingCtrTableSize);
-                    candLeafCount[id] = candidate.ResultingCtrTableSize;
+                                      &fold->GetCtrRef(proj));
                 }
+                candFeatureValueCount[id] = fold->GetCtrRef(proj).FeatureValueCount;
             }
             TVector<TVector<double>> allScores(candidate.Candidates.size());
             ctx->LocalExecutor.ExecRange([&](int oneCandidate) {
@@ -411,9 +435,9 @@ void GreedyTensorSearch(const TTrainData& data,
                 }
             }
         }, 0, candList.ysize(), NPar::TLocalExecutor::WAIT_COMPLETE);
-        size_t maxLeafCount = 1;
-        for (size_t leafCount : candLeafCount) {
-            maxLeafCount = Max(maxLeafCount, leafCount);
+        size_t maxFeatureValueCount = 1;
+        for (size_t featureValueCount : candFeatureValueCount) {
+            maxFeatureValueCount = Max(maxFeatureValueCount, featureValueCount);
         }
         fold->DropEmptyCTRs();
         CheckInterrupted(); // check after long-lasting operation
@@ -427,8 +451,12 @@ void GreedyTensorSearch(const TTrainData& data,
                 TProjection projection = candidate.SplitCandidate.Ctr.Projection;
                 ECtrType ctrType = ctx->CtrsHelper.GetCtrInfo(projection)[candidate.SplitCandidate.Ctr.CtrIdx].Type;
 
-                if (!ctx->LearnProgress.UsedCtrSplits.has(std::make_pair(ctrType, projection)) && score != MINIMAL_SCORE) {
-                    score *= pow(1 / (1 + subList.ResultingCtrTableSize / static_cast<double>(maxLeafCount)), ctx->Params.ObliviousTreeOptions->ModelSizeReg.Get());
+                if (candidate.SplitCandidate.Type == ESplitType::OnlineCtr &&
+                    !ctx->LearnProgress.UsedCtrSplits.has(std::make_pair(ctrType, projection)) &&
+                    score != MINIMAL_SCORE)
+                {
+                    score *= pow(1 + fold->GetCtrRef(projection).FeatureValueCount / static_cast<double>(maxFeatureValueCount),
+                                 -ctx->Params.ObliviousTreeOptions->ModelSizeReg.Get());
                 }
                 if (score > bestScore) {
                     bestScore = score;
@@ -449,13 +477,11 @@ void GreedyTensorSearch(const TTrainData& data,
         if (bestSplit.Type == ESplitType::OnlineCtr) {
             const auto& proj = bestSplit.Ctr.Projection;
             if (fold->GetCtrRef(proj).Feature.empty()) {
-                size_t totalLeafCount;
                 ComputeOnlineCTRs(data,
                                   *fold,
                                   proj,
                                   ctx,
-                                  &fold->GetCtrRef(proj),
-                                  &totalLeafCount);
+                                  &fold->GetCtrRef(proj));
                 DropStatsForProjection(*fold, *ctx, proj, &ctx->PrevTreeLevelStats);
             }
         } else if (bestSplit.Type == ESplitType::OneHotFeature) {

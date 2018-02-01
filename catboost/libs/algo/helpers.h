@@ -14,3 +14,15 @@ void GenerateBorders(const TPool& pool, TLearnContext* ctx, TVector<TFloatFeatur
 int GetClassesCount(const TVector<float>& target, int classesCount);
 
 void ConfigureMalloc();
+
+void UpdateQueriesInfo(const TVector<ui32>& queriesId, int begin, int end, TVector<TQueryInfo>* queryInfo);
+
+TVector<TQueryEndInfo> GetQueryEndInfo(const TVector<TQueryInfo>& queriesInfo, int learnSampleCount);
+
+void CalcErrors(
+    const TTrainData& data,
+    const TVector<THolder<IMetric>>& errors,
+    bool hasTrain,
+    bool hasTest,
+    TLearnContext* ctx
+);

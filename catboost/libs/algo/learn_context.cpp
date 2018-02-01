@@ -50,6 +50,14 @@ void TOutputFiles::InitializeFiles(const NCatboostOptions::TOutputFilesOptions& 
     const TString& metaFileFilename = params.GetMetaFileFilename();
     CB_ENSURE(!metaFileFilename.empty(), "empty meta filename");
     MetaFile = TOutputFiles::AlignFilePath(trainDir, metaFileFilename, NamesPrefix);
+
+    const TString& jsonLogFilename = params.GetJsonLogFilename();
+    CB_ENSURE(!jsonLogFilename.empty(), "empty json_log filename");
+    JsonLogFile = TOutputFiles::AlignFilePath(trainDir, jsonLogFilename, "");
+
+    const TString& profileLogFilename = params.GetProfileLogFilename();
+    CB_ENSURE(!profileLogFilename.empty(), "empty profile_log filename");
+    ProfileLogFile = TOutputFiles::AlignFilePath(trainDir, profileLogFilename, "");
 }
 
 TString FilePathForMeta(const TString& filename, const TString& namePrefix) {
@@ -75,9 +83,12 @@ void TLearnContext::OutputMeta() {
         meta << "testErrorLog\t" << FilePathForMeta(OutputOptions.GetTestErrorFilename(), Files.NamesPrefix) << Endl;
     }
     meta << "timeLeft\t" << FilePathForMeta(OutputOptions.GetTimeLeftLogFilename(), Files.NamesPrefix) << Endl;
-    auto losses = CreateMetrics(Params.MetricOptions->EvalMetric, EvalMetricDescriptor,
-                                Params.MetricOptions->CustomMetrics,
-                                LearnProgress.ApproxDimension);
+    auto losses = CreateMetrics(
+        Params.LossFunctionDescription,
+        Params.MetricOptions,
+        EvalMetricDescriptor,
+        LearnProgress.ApproxDimension
+    );
 
     for (const auto& loss : losses) {
         meta << "loss\t" << loss->GetDescription() << "\t" << (loss->IsMaxOptimal() ? "max" : "min") << Endl;
@@ -88,7 +99,6 @@ void TLearnContext::OutputMeta() {
 void TLearnContext::InitData(const TTrainData& data) {
     auto lossFunction = Params.LossFunctionDescription->GetLossFunction();
     const auto sampleCount = data.GetSampleCount();
-    const auto isQuerywiseError = IsQuerywiseError(lossFunction);
     const int foldCount = Max<ui32>(Params.BoostingOptions->PermutationCount - 1, 1);
     LearnProgress.Folds.reserve(foldCount);
     UpdateCtrsTargetBordersOption(lossFunction, LearnProgress.ApproxDimension, &Params.CatFeatureParams.Get());
@@ -108,27 +118,44 @@ void TLearnContext::InitData(const TTrainData& data) {
     }
     const auto storeExpApproxes = IsStoreExpApprox(Params);
 
-    for (int foldIdx = 0; foldIdx < foldCount; ++foldIdx) {
-        LearnProgress.Folds.emplace_back(
-            BuildLearnFold(
-                data,
-                CtrsHelper.GetTargetClassifiers(),
-                foldIdx != 0,
-                foldPermutationBlockSize,
-                LearnProgress.ApproxDimension,
-                boostingOptions.FoldLenMultiplier,
-                storeExpApproxes,
-                isQuerywiseError,
-                Rand));
+    if (IsPlainMode(Params.BoostingOptions->BoostingType)) {
+        for (int foldIdx = 0; foldIdx < foldCount; ++foldIdx) {
+            LearnProgress.Folds.emplace_back(
+                BuildPlainFold(
+                    data,
+                    CtrsHelper.GetTargetClassifiers(),
+                    foldIdx != 0,
+                    foldPermutationBlockSize,
+                    LearnProgress.ApproxDimension,
+                    storeExpApproxes,
+                    Rand
+                )
+            );
+        }
+    } else {
+        for (int foldIdx = 0; foldIdx < foldCount; ++foldIdx) {
+            LearnProgress.Folds.emplace_back(
+                BuildDynamicFold(
+                    data,
+                    CtrsHelper.GetTargetClassifiers(),
+                    foldIdx != 0,
+                    foldPermutationBlockSize,
+                    LearnProgress.ApproxDimension,
+                    boostingOptions.FoldLenMultiplier,
+                    storeExpApproxes,
+                    Rand
+                )
+            );
+        }
     }
 
-    LearnProgress.AveragingFold = BuildAveragingFold(
+    LearnProgress.AveragingFold = BuildPlainFold(
         data,
         CtrsHelper.GetTargetClassifiers(),
-        !(Params.DataProcessingOptions->HasTimeFlag|| isQuerywiseError),
+        !(Params.DataProcessingOptions->HasTimeFlag),
+        /*permuteBlockSize=*/1,
         LearnProgress.ApproxDimension,
         storeExpApproxes,
-        isQuerywiseError,
         Rand
     );
 
@@ -229,4 +256,50 @@ void TLearnProgress::Load(IInputStream* s) {
                TimeHistory,
                UsedCtrSplits,
                PoolCheckSum);
+}
+
+
+NJson::TJsonValue GetJsonMeta(
+    const TVector<const TLearnContext*>& learnContexts,
+    const TString& learnToken,
+    const TString& testToken,
+    bool hasTrain,
+    bool hasTest
+) {
+    NJson::TJsonValue meta;
+    meta["iteration_count"] = learnContexts[0]->Params.BoostingOptions->IterationCount.Get();
+    meta["name"] = learnContexts[0]->OutputOptions.GetName();
+
+    meta.InsertValue("learn_sets", NJson::JSON_ARRAY);
+    if (hasTrain) {
+        for (auto& ctx : learnContexts) {
+            meta["learn_sets"].AppendValue(ctx->Files.NamesPrefix + learnToken);
+        }
+    }
+
+    meta.InsertValue("test_sets", NJson::JSON_ARRAY);
+    if (hasTest) {
+        for (auto& ctx : learnContexts) {
+            meta["test_sets"].AppendValue(ctx->Files.NamesPrefix + testToken);
+        }
+    }
+
+    auto losses = CreateMetrics(
+        learnContexts[0]->Params.LossFunctionDescription,
+        learnContexts[0]->Params.MetricOptions,
+        learnContexts[0]->EvalMetricDescriptor,
+        learnContexts[0]->LearnProgress.ApproxDimension
+    );
+
+    meta.InsertValue("learn_metrics", NJson::JSON_ARRAY);
+    meta.InsertValue("test_metrics", NJson::JSON_ARRAY);
+    for (const auto& loss : losses) {
+        if (hasTrain) {
+            meta["learn_metrics"].AppendValue(loss->GetDescription() + "\t" + (loss->IsMaxOptimal() ? "max" : "min"));
+        }
+        if (hasTest) {
+            meta["test_metrics"].AppendValue(loss->GetDescription() + "\t" + (loss->IsMaxOptimal() ? "max" : "min"));
+        }
+    }
+    return meta;
 }

@@ -197,6 +197,11 @@ public:
         return Ptr()[Len() - 1];
     }
 
+    inline const TCharType front() const noexcept {
+        Y_ASSERT(!empty());
+        return Ptr()[0];
+    }
+
     constexpr inline size_t size() const noexcept {
         return Len();
     }
@@ -754,6 +759,13 @@ public:
             return TCharRef(*This(), 0);
         }
         return TCharRef(*This(), length() - 1);
+    }
+
+    using TBase::front;
+
+    inline TCharRef front() noexcept {
+        Y_ASSERT(!this->empty());
+        return TCharRef(*This(), 0);
     }
 
     inline size_t length() const noexcept {

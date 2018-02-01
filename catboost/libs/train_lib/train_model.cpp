@@ -7,6 +7,7 @@
 #include <catboost/libs/helpers/permutation.h>
 #include <catboost/libs/algo/model_build_helper.h>
 #include <catboost/libs/algo/tree_print.h>
+#include <catboost/libs/algo/learn_context.h>
 #include <catboost/libs/algo/cv_data_partition.h>
 #include <catboost/libs/data/load_data.h>
 #include <catboost/libs/helpers/eval_helpers.h>
@@ -52,89 +53,10 @@ static ui32 CalcFeaturesCheckSum(const TAllFeatures& allFeatures) {
     return checkSum;
 }
 
-static THashMap<ui32, ui32> CalcQueriesSize(const TVector<ui32>& queriesId) {
-    THashMap<ui32, ui32> queriesSize;
-    for (int docId = 0; docId < queriesId.ysize(); ++docId) {
-        ++queriesSize[queriesId[docId]];
-    }
-    return queriesSize;
-}
-
 namespace {
 void ShrinkModel(int itCount, TLearnProgress* progress) {
     progress->LeafValues.resize(itCount);
     progress->TreeStruct.resize(itCount);
-}
-
-static double EvalErrors(
-    const TVector<TVector<double>>& avrgApprox,
-    const TVector<float>& target,
-    const TVector<float>& weight,
-    const TVector<ui32>& queryId,
-    const THashMap<ui32, ui32>& queriesSize,
-    const TVector<TPair>& pairs,
-    const THolder<IMetric>& error,
-    int learnSampleCount,
-    int sampleCount,
-    NPar::TLocalExecutor* localExecutor
-) {
-    return error->GetFinalError(
-        error->GetErrorType() == EErrorType::PerObjectError ?
-            error->Eval(avrgApprox, target, weight, learnSampleCount, sampleCount, *localExecutor) :
-            error->GetErrorType() == EErrorType::PairwiseError ?
-                error->EvalPairwise(avrgApprox, pairs, learnSampleCount, sampleCount):
-                error->EvalQuerywise(avrgApprox, target, weight, queryId, queriesSize, learnSampleCount, sampleCount));
-}
-
-static void CalcErrors(
-    const TVector<float>& target,
-    const TVector<float>& weight,
-    const TVector<ui32>& queryId,
-    const THashMap<ui32, ui32>& queriesSize,
-    const TVector<TPair>& pairs,
-    const TVector<THolder<IMetric>>& errors,
-    int learnSampleCount,
-    int sampleCount,
-    bool hasTest,
-    TLearnProgress* learnProgress,
-    NPar::TLocalExecutor* localExecutor
-) {
-    learnProgress->LearnErrorsHistory.emplace_back();
-    if (hasTest) {
-        learnProgress->TestErrorsHistory.emplace_back();
-    }
-
-    for (int i = 0; i < errors.ysize(); ++i) {
-        double learnErr = EvalErrors(
-            learnProgress->AvrgApprox,
-            target,
-            weight,
-            queryId,
-            queriesSize,
-            pairs,
-            errors[i],
-            0,
-            learnSampleCount,
-            localExecutor
-        );
-        learnProgress->LearnErrorsHistory.back().push_back(learnErr);
-
-        if (hasTest) {
-            double testErr = EvalErrors(
-                learnProgress->AvrgApprox,
-                target,
-                weight,
-                queryId,
-                queriesSize,
-                pairs,
-                errors[i],
-                learnSampleCount,
-                sampleCount,
-                localExecutor
-            );
-            learnProgress->TestErrorsHistory.back().push_back(testErr);
-        }
-    }
 }
 
 void Train(const TTrainData& data, TLearnContext* ctx, TVector<TVector<double>>* testMultiApprox) {
@@ -144,11 +66,10 @@ void Train(const TTrainData& data, TLearnContext* ctx, TVector<TVector<double>>*
     const int approxDimension = testMultiApprox->ysize();
     const bool hasTest = sampleCount > data.LearnSampleCount;
     auto trainOneIterationFunc = GetOneIterationFunc(ctx->Params.LossFunctionDescription->GetLossFunction());
-    const auto& metricOptions = ctx->Params.MetricOptions.Get();
     TVector<THolder<IMetric>> metrics = CreateMetrics(
-        metricOptions.EvalMetric,
+        ctx->Params.LossFunctionDescription,
+        ctx->Params.MetricOptions,
         ctx->EvalMetricDescriptor,
-        metricOptions.CustomMetrics,
         approxDimension
     );
 
@@ -165,14 +86,25 @@ void Train(const TTrainData& data, TLearnContext* ctx, TVector<TVector<double>>*
     }
 
     TLogger logger;
+    TString learnToken = "learn", testToken = "test";
     if (ctx->OutputOptions.AllowWriteFiles()) {
         AddFileLoggers(
+            ctx->Params.IsProfile,
+            ctx->Params.BoostingOptions->IterationCount,
             ctx->Files.LearnErrorLogFile,
             ctx->Files.TestErrorLogFile,
             ctx->Files.TimeLeftLogFile,
+            ctx->Files.JsonLogFile,
+            ctx->Files.ProfileLogFile,
             ctx->OutputOptions.GetTrainDir(),
-            true,
-            hasTest,
+            GetJsonMeta(
+                {ctx},
+                learnToken,
+                testToken,
+                /*hasTrain=*/true,
+                hasTest
+            ),
+            ctx->OutputOptions.GetMetricPeriod(),
             &logger
         );
     }
@@ -182,12 +114,15 @@ void Train(const TTrainData& data, TLearnContext* ctx, TVector<TVector<double>>*
         ctx->LearnProgress.LearnErrorsHistory,
         ctx->LearnProgress.TestErrorsHistory,
         ctx->LearnProgress.TimeHistory,
+        learnToken,
+        testToken,
         &logger
     );
 
     AddConsoleLogger(
-        ctx->Params.IsProfile,
-        true,
+        learnToken,
+        testToken,
+        /*hasTrain=*/true,
         hasTest,
         ctx->OutputOptions.GetMetricPeriod(),
         &logger
@@ -199,15 +134,17 @@ void Train(const TTrainData& data, TLearnContext* ctx, TVector<TVector<double>>*
         errorTracker.AddError(errorsHistory[i][0], i, &valuesToLog);
     }
 
-    TVector<TFold*> folds;
-    for (auto& fold : ctx->LearnProgress.Folds) {
-        folds.push_back(&fold);
+    TFold* fold;
+    if (!ctx->LearnProgress.Folds.empty()) {
+        fold = &ctx->LearnProgress.Folds[0]; // assume that all folds have the same shape
+    } else {
+        fold = &ctx->LearnProgress.AveragingFold;
     }
 
     if (IsSamplingPerTree(ctx->Params.ObliviousTreeOptions.Get())) {
-        ctx->SmallestSplitSideDocs.Create(*folds[0]); // assume that all folds have the same shape
-        const int approxDimension = folds[0]->GetApproxDimension();
-        const int bodyTailCount = folds[0]->BodyTailArr.ysize();
+        ctx->SmallestSplitSideDocs.Create(*fold);
+        const int approxDimension = fold->GetApproxDimension();
+        const int bodyTailCount = fold->BodyTailArr.ysize();
         ctx->PrevTreeLevelStats.Create(
             CountNonCtrBuckets(CountSplits(ctx->LearnProgress.FloatFeatures), data.AllFeatures.OneHotValues),
             static_cast<int>(ctx->Params.ObliviousTreeOptions->MaxDepth),
@@ -215,26 +152,14 @@ void Train(const TTrainData& data, TLearnContext* ctx, TVector<TVector<double>>*
             bodyTailCount
         );
     }
-    ctx->SampledDocs.Create(*folds[0]); // TODO(espetrov): create only if sample rate < 1
+    ctx->SampledDocs.Create(*fold, GetBernoulliSampleRate(ctx->Params.ObliviousTreeOptions->BootstrapConfig)); // TODO(espetrov): create only if sample rate < 1
 
     for (ui32 iter = ctx->LearnProgress.TreeStruct.ysize(); iter < ctx->Params.BoostingOptions->IterationCount; ++iter) {
         profile.StartNextIteration();
 
         trainOneIterationFunc(data, ctx);
 
-        CalcErrors(
-            data.Target,
-            data.Weights,
-            data.QueryId,
-            data.QuerySize,
-            data.Pairs,
-            metrics,
-            data.LearnSampleCount,
-            sampleCount,
-            hasTest,
-            &ctx->LearnProgress,
-            &ctx->LocalExecutor
-        );
+        CalcErrors(data, metrics, /*hasTrain=*/true, hasTest, ctx);
 
         profile.AddOperation("Calc errors");
 
@@ -263,6 +188,8 @@ void Train(const TTrainData& data, TLearnContext* ctx, TVector<TVector<double>>*
             errorTracker.GetBestError(),
             errorTracker.GetBestIteration(),
             profileResults,
+            learnToken,
+            testToken,
             &logger
         );
 
@@ -290,10 +217,6 @@ void Train(const TTrainData& data, TLearnContext* ctx, TVector<TVector<double>>*
         MATRIXNET_NOTICE_LOG << "bestTest = " << errorTracker.GetBestError() << "\n";
         MATRIXNET_NOTICE_LOG << "bestIteration = " << errorTracker.GetBestIteration() << "\n";
         MATRIXNET_NOTICE_LOG << "\n";
-    }
-
-    if (ctx->Params.IsProfile || ctx->Params.LoggingLevel == ELoggingLevel::Debug) {
-        LogAverages(profile.GetProfileResults());
     }
 
     if (useBestModel && ctx->Params.BoostingOptions->IterationCount > 0) {
@@ -362,10 +285,9 @@ class TCPUModelTrainer : public IModelTrainer {
 
         const NCatboostOptions::TLossDescription& lossDescription = ctx.Params.LossFunctionDescription;
         ELossFunction lossFunction = lossDescription.GetLossFunction();
-        if (!(ctx.Params.DataProcessingOptions->HasTimeFlag || IsQuerywiseError(lossFunction))) {
-            Shuffle(indices.begin(), indices.end(), ctx.Rand);
+        if (!ctx.Params.DataProcessingOptions->HasTimeFlag) {
+            Shuffle(learnPool.Docs.QueryId, ctx.Rand, &indices);
         }
-        // TODO(annaveronika): shuffle in querywise modes.
 
         ApplyPermutation(InvertPermutation(indices), &learnPool, &ctx.LocalExecutor);
 
@@ -373,6 +295,8 @@ class TCPUModelTrainer : public IModelTrainer {
 
         TTrainData trainData;
         trainData.LearnSampleCount = learnPool.Docs.GetDocCount();
+
+        UpdateBoostingTypeOption(learnPool.Docs.GetDocCount(), &ctx.Params.BoostingOptions->BoostingType);
 
         trainData.Target.reserve(learnPool.Docs.GetDocCount() + testPool.Docs.GetDocCount());
 
@@ -418,11 +342,12 @@ class TCPUModelTrainer : public IModelTrainer {
             trainData.Baseline[dim].insert(trainData.Baseline[dim].end(), testPool.Docs.Baseline[dim].begin(), testPool.Docs.Baseline[dim].end());
         }
 
-        const auto& metricOptions = ctx.Params.MetricOptions.Get();
-        // TODO(nikitxskv): Add objective to CreateMetrics
-        TVector<THolder<IMetric>> metrics = CreateMetrics(metricOptions.EvalMetric,
+        TVector<THolder<IMetric>> metrics = CreateMetrics(
+            ctx.Params.LossFunctionDescription,
+            ctx.Params.MetricOptions,
             ctx.EvalMetricDescriptor,
-            metricOptions.CustomMetrics, 1);
+            1
+        );
         bool hasQuerywiseMetric = false;
         for (const auto& metric : metrics) {
             if (metric.Get()->GetErrorType() == EErrorType::QuerywiseError) {
@@ -430,6 +355,7 @@ class TCPUModelTrainer : public IModelTrainer {
             }
         }
         if (hasQuerywiseMetric) {
+            CB_ENSURE(trainData.QueryId.size() == trainData.Target.size(), "Query ids not provided for querywise metric.");
             bool isDataCorrect = IsCorrectQueryIdsFormat(trainData.QueryId);
             if (testPool.Docs.GetDocCount() != 0) {
                 isDataCorrect &= learnPool.Docs.QueryId.back() != testPool.Docs.QueryId.front();
@@ -437,7 +363,9 @@ class TCPUModelTrainer : public IModelTrainer {
             CB_ENSURE(isDataCorrect, "Train Pool & Test Pool should be grouped by QueryId and should have different QueryId");
             //TODO(annaveronika): Allow no grouping by query id. Warning
             //when same query id in train+test - no error.
-            trainData.QuerySize = CalcQueriesSize(trainData.QueryId);
+            UpdateQueriesInfo(trainData.QueryId, 0, trainData.LearnSampleCount, &trainData.QueryInfo);
+            trainData.LearnQueryCount = trainData.QueryInfo.ysize();
+            UpdateQueriesInfo(trainData.QueryId, trainData.LearnSampleCount, trainData.GetSampleCount(), &trainData.QueryInfo);
         }
 
         if (lossFunction == ELossFunction::Logloss) {
@@ -744,8 +672,6 @@ void TrainModel(const NJson::TJsonValue& plainJsonParams,
 void TrainOneIteration(const TTrainData& trainData, TLearnContext* ctx) {
     SetLogingLevel(ctx->Params.LoggingLevel);
 
-    auto loggingGuard = Finally([&] { SetSilentLogingMode(); });
-
     TTrainOneIterationFunc trainFunc;
     ELossFunction lossFunction = ctx->Params.LossFunctionDescription->GetLossFunction();
 
@@ -766,7 +692,7 @@ void CheckFitParams(
         CB_ENSURE(objectiveDescriptor.Defined(), "Error: provide objective descriptor for custom loss");
     }
 
-    if (options.MetricOptions->EvalMetric->GetLossFunction() == ELossFunction::Custom) {
+    if (options.MetricOptions->EvalMetric.IsSet() && options.MetricOptions->EvalMetric->GetLossFunction() == ELossFunction::Custom) {
         CB_ENSURE(evalMetricDescriptor.Defined(), "Error: provide eval metric descriptor for custom eval metric");
     }
 }

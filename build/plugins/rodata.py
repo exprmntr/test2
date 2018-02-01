@@ -3,17 +3,76 @@ import os
 import _common as common
 import _import_wrapper as iw
 
-from yasm import Yasm
 
-
-class ROData(Yasm):
+class ROData(iw.CustomCommand):
     def __init__(self, path, unit):
-        Yasm.__init__(self, path, unit)
+        self._path = path
+        self._flags = []
+
+        prefix = unit.get('ASM_PREFIX')
+
+        if prefix:
+            self._flags += ['--prefix=' + prefix]
+
+        self._incl_dirs = ['$S', '$B'] + unit.includes()
+        self._pre_include = []
+
+        flags = unit.get('YASM_FLAGS')
+        if flags:
+            self.parse_flags(path, unit, collections.deque(flags.split(' ')))
+
+        if unit.enabled('darwin') or unit.enabled('ios'):
+            self._platform = ['DARWIN', 'UNIX']
+            self._fmt = 'macho'
+        elif unit.enabled('win64') or unit.enabled('cygwin'):
+            self._platform = ['WIN64']
+            self._fmt = 'win'
+        elif unit.enabled('win32'):
+            self._platform = ['WIN32']
+            self._fmt = 'win'
+        else:
+            self._platform = ['UNIX']
+            self._fmt = 'elf'
+
+        if 'elf' in self._fmt:
+            self._flags += ['-g', 'dwarf2']
+
+        self._fmt += unit.get('hardware_arch')
+        self._type = unit.get('hardware_type')
 
         if unit.enabled('darwin') or (unit.enabled('windows') and unit.enabled('arch_type_32')):
             self._prefix = '_'
         else:
             self._prefix = ''
+
+    def parse_flags(self, path, unit, flags):
+        while flags:
+            flag = flags.popleft()
+            if flag.startswith('-I'):
+                raise Exception('Use ADDINCL macro')
+
+            if flag.startswith('-P'):
+                preinclude = flag[2:] or flags.popleft()
+                self._pre_include += unit.resolve_include([(get_retargeted(path, unit)), preinclude])
+                self._flags += ['-P', preinclude]
+                continue
+
+            self._flags.append(flag)
+
+    def descr(self):
+        return 'AS', self._path, 'light-green'
+
+    def flags(self):
+        return self._flags + self._platform + [self._fmt, self._type]
+
+    def tools(self):
+        return ['contrib/tools/yasm']
+
+    def input(self):
+        return common.make_tuples(self._pre_include + [self._path])
+
+    def output(self):
+        return common.make_tuples([common.tobuilddir(common.stripext(self._path)) + '.o'])
 
     def run(self, binary):
         in_file = self.resolve_path(common.get(self.input, 0))
@@ -29,6 +88,20 @@ class ROData(Yasm):
             f.write(self._prefix + file_name + 'Size:\ndd ' + str(os.path.getsize(in_file)) + '\n')
 
         return self.do_run(binary, tmp_file)
+
+    def do_run(self, binary, path):
+        def plt():
+            for x in self._platform:
+                yield '-D'
+                yield x
+
+        def incls():
+            for x in self._incl_dirs:
+                yield '-I'
+                yield self.resolve_path(x)
+
+        cmd = [binary, '-f', self._fmt] + list(plt()) + ['-D', '_' + self._type + '_', '-D_YASM_'] + self._flags + list(incls()) + ['-o', common.get(self.output, 0), path]
+        self.call(cmd)
 
 
 class RODataCXX(iw.CustomCommand):

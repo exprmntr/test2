@@ -9,6 +9,7 @@
 #include <catboost/libs/model/online_ctr.h>
 #include <catboost/libs/helpers/clear_array.h>
 #include <catboost/libs/data/pair.h>
+#include <catboost/libs/data/query.h>
 #include <catboost/libs/options/defaults_helper.h>
 
 #include <util/generic/vector.h>
@@ -33,13 +34,14 @@ struct TFold {
         TVector<TVector<double>> WeightedDer;
         TVector<TVector<TCompetitor>> Competitors;
 
+        int BodyQueryFinish = 0;
+        int TailQueryFinish = 0;
         int BodyFinish = 0;
         int TailFinish = 0;
     };
 
     TVector<float> LearnWeights;
-    TVector<ui32> LearnQueryId;
-    THashMap<ui32, ui32> LearnQuerySize;
+    TVector<TQueryInfo> LearnQueryInfo;
     TVector<int> LearnPermutation; // index in original array
     TVector<TBodyTail> BodyTailArr;
     TVector<float> LearnTarget;
@@ -117,20 +119,23 @@ TVector<int> CalcQueriesFinishIndex(const TVector<ui32>& queriesId);
 struct TRestorableFastRng64;
 class TTrainData;
 
-TFold BuildLearnFold(const TTrainData& data,
-                            const TVector<TTargetClassifier>& targetClassifiers,
-                            bool shuffle,
-                            int permuteBlockSize,
-                            int approxDimension,
-                            double multiplier,
-                            bool storeExpApproxes,
-                            bool isQuerywiseError,
-                            TRestorableFastRng64& rand);
+TFold BuildDynamicFold(
+    const TTrainData& data,
+    const TVector<TTargetClassifier>& targetClassifiers,
+    bool shuffle,
+    int permuteBlockSize,
+    int approxDimension,
+    double multiplier,
+    bool storeExpApproxes,
+    TRestorableFastRng64& rand
+);
 
-TFold BuildAveragingFold(const TTrainData& data,
-                                const TVector<TTargetClassifier>& targetClassifiers,
-                                bool shuffle,
-                                int approxDimension,
-                                bool storeExpApproxes,
-                                bool isQuerywiseError,
-                                TRestorableFastRng64& rand);
+TFold BuildPlainFold(
+    const TTrainData& data,
+    const TVector<TTargetClassifier>& targetClassifiers,
+    bool shuffle,
+    int permuteBlockSize,
+    int approxDimension,
+    bool storeExpApproxes,
+    TRestorableFastRng64& rand
+);

@@ -3,16 +3,16 @@
 RECURSE(
     appdirs
     backports-shutil_get_terminal_size
-    colorama-0.3.6
+    colorama
     dateutil
-    decorator-4.0.6
+    decorator
     enum34
     ipython
     ipython/bin
-    ipython_genutils-0.1.0
+    ipython_genutils
     Jinja2
     MarkupSafe
-    numpy-1.11.1
+    numpy
     packaging
     pandas
     pandas/matplotlib
@@ -28,7 +28,7 @@ RECURSE(
     pytest
     pytz
     pytz/tests
-    PyYAML-3.11
+    PyYAML
     requests
     setuptools
     simplegeneric-0.8.1

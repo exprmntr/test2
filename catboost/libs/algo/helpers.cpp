@@ -68,15 +68,13 @@ void GenerateBorders(const TPool& pool, TLearnContext* ctx, TVector<TFloatFeatur
     THashSet<int> ignoredFeatureIndexes(ctx->Params.DataProcessingOptions->IgnoredFeatures->begin(), ctx->Params.DataProcessingOptions->IgnoredFeatures->end());
     auto calcOneFeatureBorder = [&](int idx) {
         auto& floatFeature = floatFeatures->at(idx);
-        const auto floatFeatureIdx = floatFeatures->at(idx).FlatFeatureIndex;
+        const auto floatFeatureIdx = floatFeature.FlatFeatureIndex;
         if (ignoredFeatureIndexes.has(floatFeatureIdx)) {
             return;
         }
 
         TVector<float> vals;
         vals.reserve(samplesToBuildBorders);
-
-        floatFeature.HasNans = AnyOf(docStorage.Factors[floatFeatureIdx], IsNan);
         for (size_t i = 0; i < samplesToBuildBorders; ++i) {
             const size_t randomDocIdx = isShuffleNeeded ? randomShuffle[i] : i;
             const float factor = docStorage.Factors[floatFeatureIdx][randomDocIdx];
@@ -84,11 +82,16 @@ void GenerateBorders(const TPool& pool, TLearnContext* ctx, TVector<TFloatFeatur
                 vals.push_back(factor);
             }
         }
-        Sort(vals.begin(), vals.end());
 
         THashSet<float> borderSet = BestSplit(vals, borderCount, borderType);
+        if (borderSet.has(-0.0f)) { // BestSplit might add negative zeros
+            borderSet.erase(-0.0f);
+            borderSet.insert(0.0f);
+        }
         TVector<float> bordersBlock(borderSet.begin(), borderSet.end());
         Sort(bordersBlock.begin(), bordersBlock.end());
+
+        floatFeature.HasNans = AnyOf(docStorage.Factors[floatFeatureIdx], IsNan);
         if (floatFeature.HasNans) {
             if (nanMode == ENanMode::Min) {
                 bordersBlock.insert(bordersBlock.begin(), std::numeric_limits<float>::lowest());
@@ -129,4 +132,80 @@ void ConfigureMalloc() {
         MATRIXNET_DEBUG_LOG << "link with lfalloc for better performance" << Endl;
     }
 #endif
+}
+
+void UpdateQueriesInfo(const TVector<ui32>& queriesId, int begin, int end, TVector<TQueryInfo>* queryInfo) {
+    if (begin == end) {
+        return;
+    }
+    ui32 currentQueryId = queriesId[begin];
+    int currentQuerySize = 0;
+    for (int docId = begin; docId < end; ++docId) {
+        if (currentQueryId == queriesId[docId]) {
+            ++currentQuerySize;
+        } else {
+            queryInfo->push_back({docId - currentQuerySize, docId});
+            currentQuerySize = 1;
+            currentQueryId = queriesId[docId];
+        }
+    }
+    queryInfo->push_back({end - currentQuerySize, end});
+}
+
+TVector<TQueryEndInfo> GetQueryEndInfo(const TVector<TQueryInfo>& queriesInfo, int learnSampleCount) {
+    TVector<TQueryEndInfo> queriesInfoForDocs;
+    queriesInfoForDocs.reserve(learnSampleCount);
+    for (int queryIndex = 0; queryIndex < queriesInfo.ysize(); ++queryIndex) {
+        queriesInfoForDocs.insert(
+            queriesInfoForDocs.end(),
+            queriesInfo[queryIndex].End- queriesInfo[queryIndex].Begin,
+            {queriesInfo[queryIndex].End, queryIndex}
+        );
+    }
+    return queriesInfoForDocs;
+}
+
+void CalcErrors(
+    const TTrainData& data,
+    const TVector<THolder<IMetric>>& errors,
+    bool hasTrain,
+    bool hasTest,
+    TLearnContext* ctx
+) {
+    if (hasTrain) {
+        ctx->LearnProgress.LearnErrorsHistory.emplace_back();
+        for (int i = 0; i < errors.ysize(); ++i) {
+            ctx->LearnProgress.LearnErrorsHistory.back().push_back(EvalErrors(
+                ctx->LearnProgress.AvrgApprox,
+                data.Target,
+                data.Weights,
+                data.QueryInfo,
+                data.Pairs,
+                errors[i],
+                /*queryStartIndex=*/0,
+                data.LearnQueryCount,
+                /*begin=*/0,
+                data.LearnSampleCount,
+                &ctx->LocalExecutor
+            ));
+        }
+    }
+    if (hasTest) {
+        ctx->LearnProgress.TestErrorsHistory.emplace_back();
+        for (int i = 0; i < errors.ysize(); ++i) {
+            ctx->LearnProgress.TestErrorsHistory.back().push_back(EvalErrors(
+                ctx->LearnProgress.AvrgApprox,
+                data.Target,
+                data.Weights,
+                data.QueryInfo,
+                data.Pairs,
+                errors[i],
+                data.LearnQueryCount,
+                data.GetQueryCount(),
+                data.LearnSampleCount,
+                data.GetSampleCount(),
+                &ctx->LocalExecutor
+            ));
+        }
+    }
 }

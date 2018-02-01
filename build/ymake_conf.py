@@ -1055,7 +1055,7 @@ class GnuToolchain(Toolchain):
         else:
             # temporary https://st.yandex-team.ru/DEVTOOLS-4027
             emit('PERL_OS_SDK', self.tc.os_sdk)
-        emit('OS_SDK_ROOT', None if self.tc.os_sdk_local else '$(OS_SDK_ROOT)')
+        emit('OS_SDK_ROOT', None if self.tc.os_sdk_local else '$OS_SDK_ROOT_RESOURCE_GLOBAL')
 
 
 class GnuCompiler(Compiler):
@@ -1264,11 +1264,16 @@ class Clang(GnuCompiler):
             self.c_flags.append('-Wno-inconsistent-missing-override')
 
         if self.tc.version_at_least(5, 0):
-            self.c_flags.append('-Wno-unknown-warning-option')
             self.c_flags.append('-Wno-c++17-extensions')
-            self.c_flags.append('-Wno-instantiation-after-specialization')
             self.c_flags.append('-Wno-exceptions')
-            self.c_flags.append('-Wno-address-of-packed-member')
+
+    def print_compiler(self):
+        super(Clang, self).print_compiler()
+
+        # fuzzing configuration
+        if self.tc.version_at_least(5,0):
+            emit('FSANITIZE_FUZZER_SUPPORTED', 'yes')
+            emit('LIBFUZZER_PATH', 'contrib/libs/libfuzzer-5.0')
 
 
 class Linker(object):
@@ -2012,7 +2017,7 @@ class Cuda(object):
         nvcc_flags = []
 
         if use_arcadia_cuda:
-            emit('CUDA_ROOT', '$(CUDA)')
+            emit('CUDA_ROOT', '$CUDA_RESOURCE_GLOBAL')
 
             cuda_compiler = self.get_cuda_compiler()
             if cuda_compiler is not None:
@@ -2043,9 +2048,9 @@ class Cuda(object):
 
         if target.is_linux:
             if target.is_x86_64:
-                return '$(CUDA)/compiler/gcc/bin/g++-4.9'
+                return '$CUDA_RESOURCE_GLOBAL/compiler/gcc/bin/g++-4.9'
             elif target.is_aarch64:
-                return '$(CUDA)/compiler/gcc/bin/aarch64-linux-g++'
+                return '$CUDA_RESOURCE_GLOBAL/compiler/gcc/bin/aarch64-linux-g++'
 
         elif target.is_macos:
             if target.is_x86_64:
@@ -2099,19 +2104,12 @@ class Yasm(object):
             self.flags += ['-g', 'dwarf2']
 
     def print_variables(self):
-        print '''\
-when ($ASM_PREFIX) {
-    ASM_PREFIX_VALUE=--prefix=$ASM_PREFIX
-}
-otherwise {
-    ASM_PREFIX_VALUE=
-}
-'''
         d_platform = ' '.join([('-D ' + i) for i in self.platform])
         output = '${{output;noext:SRC.{}}}'.format('o' if self.fmt != 'win' else 'obj')
         print '''\
-macro _SRC_yasm(SRC) {{
-    .CMD={} -f {}$HARDWARE_ARCH {} -D ${{pre=_;suf=_:HARDWARE_TYPE}} -D_YASM_ $ASM_PREFIX_VALUE {} ${{YASM_FLAGS}} ${{pre=-I :INCLUDE}} -o {} ${{input:SRC}} ${{kv;hide:"p AS"}} ${{kv;hide:"pc light-green"}}
+macro _SRC_yasm_impl(SRC, PREINCLUDES[], SRCFLAGS...) {{
+    .CMD={} -f {}$HARDWARE_ARCH {} -D ${{pre=_;suf=_:HARDWARE_TYPE}} -D_YASM_ $ASM_PREFIX_VALUE {} ${{YASM_FLAGS}} ${{pre=-I :INCLUDE}} -o {} ${{pre=-P :PREINCLUDES}} ${{input:SRC}} ${{kv;hide:"p AS"}} ${{kv;hide:"pc light-green"}} ${{input;hide:PREINCLUDES}}
+
 }}
 '''.format(self.yasm_tool, self.fmt, d_platform, ' '.join(self.flags), output)
 

@@ -1,3 +1,4 @@
+#include "modes.h"
 #include "cmd_line.h"
 #include "proceed_pool_in_blocks.h"
 
@@ -27,9 +28,13 @@ static TEvalResult Apply(
     if (pool.Docs.Baseline.ysize() > 0) {
         rawValues.assign(pool.Docs.Baseline.begin(), pool.Docs.Baseline.end());
     }
+    TModelCalcerOnPool modelCalcerOnPool(model, pool, *executor);
+    TVector<TVector<double>> approx;
     for (; begin < end; begin += evalPeriod) {
-        TVector<TVector<double>> approx = ApplyModelMulti(model, pool, EPredictionType::RawFormulaVal,
-                                                          begin, Min(begin + evalPeriod, end), *executor);
+        modelCalcerOnPool.ApplyModelMulti(EPredictionType::RawFormulaVal,
+                                          begin,
+                                          Min(begin + evalPeriod, end),
+                                          &approx);
         if (rawValues.empty()) {
             rawValues.swap(approx);
         } else {
@@ -82,9 +87,9 @@ int mode_calc(int argc, const char* argv[]) {
     iterationsLimit = Min(iterationsLimit, model.GetTreeCount());
 
     if (evalPeriod == 0) {
-        evalPeriod = model.GetTreeCount();
+        evalPeriod = iterationsLimit;
     } else {
-        evalPeriod = Min(evalPeriod, model.GetTreeCount());
+        evalPeriod = Min(evalPeriod, iterationsLimit);
     }
 
     const int blockSize = Max<int>(32, static_cast<int>(10000. / (static_cast<double>(iterationsLimit) / evalPeriod) / model.ObliviousTrees.ApproxDimension));
